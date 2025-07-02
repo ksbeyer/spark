@@ -76,12 +76,16 @@ case class DescribeTableExec(
     rows += toCatalystRow("Table Properties", properties, "")
 
     // If any columns have default values, append them to the result.
+    // todo: shouldn't this use columns?
     ResolveDefaultColumns.getDescribeMetadata(table.schema).foreach { row =>
       rows += toCatalystRow(row._1, row._2, row._3)
     }
+    // todo: generated and identity
+    // todo: table constraints
   }
 
   private def addSchema(rows: ArrayBuffer[InternalRow]): Unit = {
+    // todo: use columns
     rows ++= table.schema.map{ column =>
       toCatalystRow(
         column.name, column.dataType.simpleString, column.getComment().orNull)

@@ -121,6 +121,7 @@ abstract class Attribute extends LeafExpression with NamedExpression {
   override def toAttribute: Attribute = this
   def newInstance(): Attribute
 
+  final def toStructField: StructField = StructField(name, dataType, nullable, metadata)
 }
 
 /**

@@ -772,6 +772,15 @@ private[sql] object QueryParsingErrors extends DataTypeErrorsBase {
       ctx)
   }
 
+  def generatedWithDefault(
+      ctx: ParserRuleContext,
+      columnName: String): ParseException = {
+    new ParseException(
+      errorClass = "GENERATED_COLUMN_WITH_DEFAULT_VALUE",
+      messageParameters = Map("columnName" -> columnName),
+      ctx)
+  }
+
   def invalidDatetimeUnitError(
       ctx: ParserRuleContext,
       functionName: String,

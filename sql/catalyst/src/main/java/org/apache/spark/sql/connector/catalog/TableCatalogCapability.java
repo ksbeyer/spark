@@ -33,18 +33,36 @@ import org.apache.spark.annotation.Evolving;
 public enum TableCatalogCapability {
 
   /**
-   * Signals that the TableCatalog supports defining generated columns upon table creation in SQL.
+   * Signals that the TableCatalog supports defining tables with STORED generated columns.
    * <p>
    * Without this capability, any create/replace table statements with a generated column defined
    * in the table schema will throw an exception during analysis.
    * <p>
-   * A generated column is defined with syntax: {@code colName colType GENERATED ALWAYS AS (expr)}
+   * A generated column is defined with syntax:
+   *   {@code colName colType GENERATED ALWAYS AS (expr) [STORED]}
+   *   todo: implement syntax
    * <p>
    * Generation expression are included in the column definition for APIs like
    * {@link TableCatalog#createTable}.
-   * See {@link Column#generationExpression()}.
+   * See {@link Column#generatedColumnSpec()}.
    */
   SUPPORTS_CREATE_TABLE_WITH_GENERATED_COLUMNS,
+
+  /**
+   * Signals that the TableCatalog supports defining tables with VIRTUAL generated columns.
+   * <p>
+   * Without this capability, any create/replace table statements with a generated column defined
+   * in the table schema will throw an exception during analysis.
+   * <p>
+   * A virtual column is defined with syntax:
+   *   {@code colName colType GENERATED ALWAYS AS (expr) VIRTUAL}
+   *   todo: implement syntax
+   * <p>
+   * Generation expression are included in the column definition for APIs like
+   * {@link TableCatalog#createTable}.
+   * See {@link Column#generatedColumnSpec()}.
+   */
+  SUPPORTS_CREATE_TABLE_WITH_VIRTUAL_COLUMNS,
 
   /**
    * Signals that the TableCatalog supports defining column default value as expression in

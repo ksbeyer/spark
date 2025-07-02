@@ -19,6 +19,7 @@ package org.apache.spark.sql.connector.catalog
 
 import java.util
 import java.util.{Collections, Locale}
+import javax.annotation.Nullable
 
 import scala.jdk.CollectionConverters._
 
@@ -34,7 +35,7 @@ import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns._
 import org.apache.spark.sql.connector.catalog.TableChange._
 import org.apache.spark.sql.connector.catalog.constraints.Constraint
 import org.apache.spark.sql.connector.catalog.functions.UnboundFunction
-import org.apache.spark.sql.connector.expressions.{ClusterByTransform, LiteralValue, Transform}
+import org.apache.spark.sql.connector.expressions.{ClusterByTransform, ExternalExpression, LiteralValue, Transform}
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.types.{ArrayType, MapType, Metadata, MetadataBuilder, StructField, StructType}
 import org.apache.spark.sql.util.CaseInsensitiveStringMap
@@ -580,9 +581,9 @@ private[sql] object CatalogV2Util {
     Option(col.comment()).foreach { comment =>
       f = f.withComment(comment)
     }
-    Option(col.defaultValue()).foreach { default =>
-      f = encodeDefaultValue(default, f)
-    }
+    f = encodeDefaultValue(col.defaultValue(), f)
+    f = encodeGeneratedColumn(col.generatedColumnSpec(), f)
+    // todo: encodeIdentity
     f
   }
 
@@ -609,17 +610,44 @@ private[sql] object CatalogV2Util {
   }
 
   private def extractExistsDefault(default: ColumnDefaultValue): String = {
+    // todo:  new V2ExpressionSQLBuilder().build(default.getValue)
+    //       but it doesn't look right; it should probably use this logic.
+    // todo: why not make v2 Expression.toString produce valid spark sql via
+    //      new V2ExpressionSQLBuilder().build(this)
     Literal(default.getValue.value, default.getValue.dataType).sql
   }
 
   private def extractCurrentDefault(default: ColumnDefaultValue): (String, Option[Expression]) = {
     val expr = Option(default.getExpression).flatMap(V2ExpressionUtils.toCatalyst)
+    // todo: is catalyst Expr.sql expected to produce valid spark sql?
+    //       should we instead convert v2 Expr to sql via V2ExpressionSQLBuilder?
     val sql = Option(default.getSql).orElse(expr.map(_.sql)).getOrElse {
       throw SparkException.internalError(
         s"Can't generate SQL for $default. The connector expression couldn't be " +
         "converted to Catalyst and there is no provided SQL representation.")
     }
     (sql, expr)
+  }
+
+  private def encodeGeneratedColumn(@Nullable spec: GeneratedColumnSpec,
+                                   f: StructField): StructField = {
+    if (spec == null) {
+      f
+    } else {
+
+      require(!spec.virtual(),
+        "virtual columns are not supported on v1 tables")  // todo: better error
+      val extExpr = spec.expression()
+      require(extExpr.ok(), "Cannot encode unevaluable expression") // todo: what to do here?
+      val sql = spec.expression().getSql
+      val newMetadata = new MetadataBuilder()
+          .withMetadata(f.metadata)
+          .putString(GeneratedColumn.GENERATION_EXPRESSION_METADATA_KEY, sql)
+          // todo: putExpression for GC? how is it used?
+          // .putExpression(CURRENT_DEFAULT_COLUMN_METADATA_KEY, sql, expr)
+          .build()
+      f.copy(metadata = newMetadata)
+    }
   }
 
   /**
@@ -651,8 +679,6 @@ private[sql] object CatalogV2Util {
     val isGeneratedColumn = GeneratedColumn.isGeneratedColumn(f)
     val isIdentityColumn = IdentityColumn.isIdentityColumn(f)
     if (isDefaultColumn) {
-      checkDefaultColumnConflicts(f)
-
       val e = analyze(
         f,
         statementType = "Column analysis",
@@ -669,10 +695,12 @@ private[sql] object CatalogV2Util {
       Column.create(f.name, f.dataType, f.nullable, f.getComment().orNull, defaultValue,
         metadataAsJson(cleanedMetadata))
     } else if (isGeneratedColumn) {
+      val sql = GeneratedColumn.getGenerationExpression(f).get
+      val genExpr = new GeneratedColumnSpec(ExternalExpression.create(sql), false)
       val cleanedMetadata = metadataWithKeysRemoved(
         Seq("comment", GeneratedColumn.GENERATION_EXPRESSION_METADATA_KEY))
       Column.create(f.name, f.dataType, f.nullable, f.getComment().orNull,
-        GeneratedColumn.getGenerationExpression(f).get, metadataAsJson(cleanedMetadata))
+        genExpr, metadataAsJson(cleanedMetadata))
     } else if (isIdentityColumn) {
       val cleanedMetadata = metadataWithKeysRemoved(
         Seq("comment",
@@ -688,26 +716,4 @@ private[sql] object CatalogV2Util {
     }
   }
 
-  private def checkDefaultColumnConflicts(f: StructField): Unit = {
-    if (GeneratedColumn.isGeneratedColumn(f)) {
-      throw new AnalysisException(
-        errorClass = "GENERATED_COLUMN_WITH_DEFAULT_VALUE",
-        messageParameters = Map(
-          "colName" -> f.name,
-          "defaultValue" -> f.getCurrentDefaultValue().get,
-          "genExpr" -> GeneratedColumn.getGenerationExpression(f).get
-        )
-      )
-    }
-    if (IdentityColumn.isIdentityColumn(f)) {
-      throw new AnalysisException(
-        errorClass = "IDENTITY_COLUMN_WITH_DEFAULT_VALUE",
-        messageParameters = Map(
-          "colName" -> f.name,
-          "defaultValue" -> f.getCurrentDefaultValue().get,
-          "identityColumnSpec" -> IdentityColumn.getIdentityInfo(f).get.toString
-        )
-      )
-    }
-  }
 }

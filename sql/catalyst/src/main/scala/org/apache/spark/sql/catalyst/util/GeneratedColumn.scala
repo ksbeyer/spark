@@ -52,6 +52,16 @@ object GeneratedColumn {
     field.metadata.contains(GENERATION_EXPRESSION_METADATA_KEY)
   }
 
+  def isGeneratedAlways(field: StructField): Boolean =
+    isGeneratedColumn(field) ||
+        IdentityColumn.getIdentityInfo(field).exists(! _.isAllowExplicitInsert)
+
+  def failIfGenerateAlways(field: StructField): Unit = {
+    if (GeneratedColumn.isGeneratedAlways(field)) {
+      // todo: better error
+      throw new Exception("cannot specify value for GENERATED ALWAYS field")
+    }
+  }
   /**
    * Returns the generation expression stored in the column metadata if it exists
    */
@@ -203,6 +213,17 @@ object GeneratedColumn {
 
 /**
  * Analyzer for processing generated column expressions using built-in functions only.
+ *
+ * UDFs are dangerous in generated columns because the UDF can change.
+ * The system assumes that the stored value is equal to the function result.
+ * For example, it can rewrite foo(x) in a query to generated column y = foo(x)
+ * and get inconsistent results.  If UDFs get versioned, then we could allow
+ * these immutable UDFs.
+ * todo: this should be common with other Column expressions, at least constraints.
+ *       If the system assumes constraints are true (that is the design of them)
+ *       and the planner uses the constraint to make a semantic change, changing
+ *       udfs will lead to inconsistent results.
+ * todo: identical to DefaultColumnAnalyzer; merge
  */
 object GeneratedColumnAnalyzer extends Analyzer(
   new CatalogManager(BuiltInFunctionCatalog, BuiltInFunctionCatalog.v1Catalog)) {

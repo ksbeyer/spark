@@ -27,8 +27,9 @@ import org.apache.spark.sql.catalyst.expressions.objects.AssertNotNull
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
-import org.apache.spark.sql.catalyst.util.CharVarcharUtils
-import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getDefaultValueExprOrNullLit
+import org.apache.spark.sql.catalyst.util.{CharVarcharUtils, GeneratedColumnV2}
+import org.apache.spark.sql.catalyst.util.GeneratedColumn.{failIfGenerateAlways, isGeneratedAlways}
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.{getDefaultOrIdentity, getGeneratedOrIdentityOrThrow}
 import org.apache.spark.sql.catalyst.util.TypeUtils.toSQLId
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
 import org.apache.spark.sql.errors.QueryCompilationErrors
@@ -76,13 +77,24 @@ object TableOutputResolver extends SQLConfHelper with Logging {
 
   def resolveOutputColumns(
       tableName: String,
-      expected: Seq[Attribute],
+      expectedPlusGenerated: Seq[Attribute],
       query: LogicalPlan,
       byName: Boolean,
       conf: SQLConf,
       supportColDefaultValue: Boolean = false): LogicalPlan = {
 
+    // At this point DEFAULT keyword columns are removed from the input for
+    // GENERATED ALWAYS columns.
+    val expected = expectedPlusGenerated.filterNot(a => isGeneratedAlways(a.toStructField))
+
+    if (!supportColDefaultValue && expected.length < expectedPlusGenerated.length) {
+      // todo: what to do if supportColDefaultValue = false but we have GENERATE ALWAYS?
+      throw new IllegalArgumentException(
+        "supportColDefaultValue = false but we have GENERATE ALWAYS...")
+    }
+
     if (expected.size < query.output.size) {
+      // todo: should we distinguish extra columns vs trying to write to a default column?
       throw QueryCompilationErrors.cannotWriteTooManyColumnsToTableError(
         tableName, expected.map(_.name), query.output)
     }
@@ -112,11 +124,44 @@ object TableOutputResolver extends SQLConfHelper with Logging {
         tableName, expected.map(_.name).map(toSQLId).mkString(", "))
     }
 
-    if (resolved == query.output) {
-      query
-    } else {
-      Project(resolved, query)
+    assert (resolved.forall(_.resolved))
+    val queryReorderedWithDefaults =
+      if (resolved == query.output) {
+        query
+      } else {
+        Project(resolved, query)
+      }
+
+    val result =
+      if (expected.length == expectedPlusGenerated.length) {
+        queryReorderedWithDefaults
+      } else {
+        addGeneratedAlwaysColumns(expectedPlusGenerated, queryReorderedWithDefaults, resolved)
+      }
+
+    assert(result.resolved)
+    result
+  }
+
+  private def addGeneratedAlwaysColumns(expectedPlusGenerated: Seq[Attribute],
+                                        query: LogicalPlan,
+                                        resolved: Seq[NamedExpression]): LogicalPlan = {
+    val resolvedIter = resolved.iterator
+    val lower = Seq.newBuilder[NamedExpression]
+    val upper = Seq.newBuilder[NamedExpression]
+    expectedPlusGenerated.foreach { attr =>
+      val field = attr.toStructField
+      if (isGeneratedAlways(field)) {
+        upper += Alias(getGeneratedOrIdentityOrThrow(field), field.name)()
+      } else {
+        val renamed = Alias(resolvedIter.next().toAttribute, field.name)()
+        lower += renamed
+        upper += renamed.toAttribute
+      }
     }
+    assert(resolvedIter.isEmpty)
+    val withGenerated = Project(upper.result(), Project(lower.result(), query))
+    GeneratedColumnV2.analyzeAndValidateUse(withGenerated)
   }
 
   def resolveUpdate(
@@ -214,11 +259,13 @@ object TableOutputResolver extends SQLConfHelper with Logging {
       fillDefaultValue: Boolean = false): Seq[NamedExpression] = {
     val matchedCols = mutable.HashSet.empty[String]
     val reordered = expectedCols.flatMap { expectedCol =>
+      val expectedField = expectedCol.toStructField
       val matched = inputCols.filter(col => conf.resolver(col.name, expectedCol.name))
       val newColPath = colPath :+ expectedCol.name
       if (matched.isEmpty) {
         val defaultExpr = if (fillDefaultValue) {
-          getDefaultValueExprOrNullLit(expectedCol, conf.useNullsForMissingDefaultColumnValues)
+          getDefaultOrIdentity(expectedField, conf.useNullsForMissingDefaultColumnValues).
+              map(Alias(_, expectedCol.name)())
         } else {
           None
         }
@@ -233,6 +280,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
           tableName, newColPath.quoted
         )
       } else {
+        failIfGenerateAlways(expectedField)
         matchedCols += matched.head.name
         val expectedName = expectedCol.name
         val matchedCol = matched.head match {
@@ -283,6 +331,13 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     }
   }
 
+  /**
+   * Resolve the columns by position.
+   * This requires that the input have exactly the number of columns as the table.
+   * The user can/must use DEFAULT for default values / generated columns / identity columns.
+   * These DEFAULTs are expanded prior to here by ResolveColumnDefaultInCommandInputQuery.
+   * todo: now is too late to detect an expanded default vs user specified value.
+   */
   private def resolveColumnsByPosition(
       tableName: String,
       inputCols: Seq[NamedExpression],

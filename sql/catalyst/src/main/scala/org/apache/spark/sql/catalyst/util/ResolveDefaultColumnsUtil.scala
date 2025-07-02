@@ -191,6 +191,7 @@ object ResolveDefaultColumns extends QueryErrorsBase
 
   private def getDefaultValueExprOpt(field: StructField): Option[Expression] = {
     if (field.metadata.contains(CURRENT_DEFAULT_COLUMN_METADATA_KEY)) {
+      // todo: unify analysis with gen columns? eg, only builtin fns, configs locked down
       Some(analyze(field, "INSERT"))
     } else {
       None
@@ -230,11 +231,7 @@ object ResolveDefaultColumns extends QueryErrorsBase
   def getDefaultValueExprOrNullLit(
       field: StructField, useNullAsDefault: Boolean): Option[NamedExpression] = {
     getDefaultValueExprOpt(field).orElse {
-      if (useNullAsDefault && field.nullable) {
-        Some(Literal(null, field.dataType))
-      } else {
-        None
-      }
+      getNullDefault(field, useNullAsDefault)
     }.map(expr => Alias(expr, field.name)())
   }
 
@@ -248,6 +245,49 @@ object ResolveDefaultColumns extends QueryErrorsBase
     val field = StructField(attr.name, attr.dataType, attr.nullable, attr.metadata)
     getDefaultValueExprOrNullLit(field, useNullAsDefault)
   }
+
+
+  // todo: figure out what of this is still used...
+
+  private[catalyst] def getDefaultOrIdentityOrThrow(field: StructField,
+                                             useNullAsDefault: Boolean): Expression =
+    getDefaultOrIdentity(field, useNullAsDefault).getOrElse(failNoDefault(field.name))
+
+  private[catalyst] def getDefaultOrIdentity(field: StructField,
+                                             useNullAsDefault: Boolean): Option[Expression] =
+    getDefaultValueExprOpt(field).
+        orElse(getIdentityExpr(field)).
+        orElse(getNullDefault(field, useNullAsDefault))
+        // map(expr => Alias(expr, field.name)())
+
+  private def failNoDefault(name: String): Nothing = {
+    throw new AnalysisException( // todo: generalize message for gen cols
+      errorClass = "NO_DEFAULT_COLUMN_VALUE_AVAILABLE",
+      messageParameters = Map("colName" -> toSQLId(Seq(name))))
+  }
+
+  private def getIdentityExpr(field: StructField): Option[Expression] = {
+    // todo: better error or implement
+    IdentityColumn.getIdentityInfo(field).map { idSpec =>
+      throw new Exception(s"identity not yet implemented: ${field.name}")
+    }
+  }
+
+  def getGeneratedOrIdentityOrThrow(field: StructField): Expression =
+    getGeneratedExpr(field).
+        orElse(getIdentityExpr(field)).
+        getOrElse(failNoDefault(field.name))
+
+  private def getGeneratedExpr(field: StructField): Option[Expression] =
+    GeneratedColumn.getGenerationExpression(field).map { sql =>
+      val parsed = GeneratedColumnV2.parseExpression("field", field.name, sql)
+      UpCast(parsed, field.dataType)
+    }
+
+  private def getNullDefault(field: StructField, useNullAsDefault: Boolean): Option[Expression] =
+    Option.when(useNullAsDefault && field.nullable) {
+      Literal(null, field.dataType)
+    }
 
   /**
    * Parses and analyzes the DEFAULT column text in `field`, returning an error upon failure.
@@ -596,7 +636,7 @@ object ResolveDefaultColumns extends QueryErrorsBase
     } else if (default.resolved) {
       targetTypeOption match {
         case Some(targetType) =>
-          CharVarcharUtils.replaceCharVarcharWithString(targetType)
+          CharVarcharUtils.replaceCharVarcharWithString(targetType) // todo: result lost
           if (!Cast.canUpCast(default.child.dataType, targetType) &&
             defaultValueFromWiderTypeLiteral(default.child, targetType, colName).isEmpty) {
             throw QueryCompilationErrors.defaultValuesDataTypeError(

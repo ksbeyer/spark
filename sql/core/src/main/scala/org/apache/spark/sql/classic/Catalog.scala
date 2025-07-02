@@ -408,6 +408,7 @@ class Catalog(sparkSession: SparkSession) extends catalog.Catalog {
         val clusteringColumnNames = clusterBySpecOpt.map { clusterBySpec =>
           clusterBySpec.columnNames.map(_.toString)
         }.getOrElse(Nil).toSet
+        // todo: do we continue to expose field expressions as metadata?
         schemaToColumns(table.schema(), partitionColumnNames.contains, bucketColumnNames.contains,
           clusteringColumnNames.contains)
 

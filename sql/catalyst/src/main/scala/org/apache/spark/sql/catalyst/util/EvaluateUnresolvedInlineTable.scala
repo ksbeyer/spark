@@ -23,7 +23,7 @@ import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.trees.TreePattern.CURRENT_LIKE
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.util.TypeUtils.{toSQLExpr, toSQLId}
-import org.apache.spark.sql.types.{StructField, StructType}
+import org.apache.spark.sql.types.{NullType, StructField, StructType}
 
 /**
  * Utility object used to replace [[UnresolvedInlineTable]] with [[ResolvedInlineTable]] or
@@ -106,6 +106,20 @@ object EvaluateUnresolvedInlineTable extends SQLConfHelper
    * This is package visible for unit testing.
    */
   def findCommonTypesAndCast(table: UnresolvedInlineTable): ResolvedInlineTable = {
+    // Special case no-columns and no-rows.
+    // The non-empty case uses transpose, which incorrecly returns a completely empty table.
+    if (table.names.isEmpty) {
+      // Return table with no columns, but 0 OR MORE rows.
+      assert(table.rows.forall(_.isEmpty))
+      return ResolvedInlineTable(table.rows, Seq.empty)
+    }
+    if (table.rows.isEmpty) {
+      // Return table with no rows, but ONE OR MORE columns.
+      // todo: should no-rows be invalid instead of null attributes?
+      val schema = StructType(table.names.map(n => StructField(n, NullType)))
+      val attrs = DataTypeUtils.toAttributes(schema)
+      return ResolvedInlineTable(Seq.empty, attrs)
+    }
     // For each column, traverse all the values and find a common data type and nullability.
     val (fields, columns) = table.rows.transpose.zip(table.names).map { case (column, name) =>
       val inputTypes = column.map(_.dataType)

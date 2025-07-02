@@ -17,7 +17,9 @@
 
 package org.apache.spark.sql.internal.connector
 
-import org.apache.spark.sql.connector.catalog.{Column, ColumnDefaultValue, IdentityColumnSpec}
+import javax.annotation.Nullable
+
+import org.apache.spark.sql.connector.catalog.{Column, ColumnDefaultValue, GeneratedColumnSpec, IdentityColumnSpec}
 import org.apache.spark.sql.types.DataType
 
 // The standard concrete implementation of data source V2 column.
@@ -25,8 +27,13 @@ case class ColumnImpl(
     name: String,
     dataType: DataType,
     nullable: Boolean,
-    comment: String,
-    defaultValue: ColumnDefaultValue,
-    generationExpression: String,
-    identityColumnSpec: IdentityColumnSpec,
-    metadataInJSON: String) extends Column
+    @Nullable comment: String, // nullable
+    // todo: The next 3 are mutually exclusive; make hierarchy?
+    @Nullable defaultValue: ColumnDefaultValue,
+    @Nullable generatedColumnSpec: GeneratedColumnSpec,
+    @Nullable identityColumnSpec: IdentityColumnSpec,
+    @Nullable metadataInJSON: String)
+    extends Column {
+  require(Seq(defaultValue, generatedColumnSpec, identityColumnSpec).count(_ ne null) <= 1,
+    "at most one of defaultValue, generatedColumnSpec, identityColumnSpec may be specified")
+}

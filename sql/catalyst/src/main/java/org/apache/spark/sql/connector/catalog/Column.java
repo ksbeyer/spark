@@ -72,10 +72,10 @@ public interface Column {
       DataType dataType,
       boolean nullable,
       String comment,
-      String generationExpression,
+      GeneratedColumnSpec generatedColumnSpec,
       String metadataInJSON) {
     return new ColumnImpl(name, dataType, nullable, comment, null,
-            generationExpression, null, metadataInJSON);
+        generatedColumnSpec, null, metadataInJSON);
   }
 
   static Column create(
@@ -123,7 +123,7 @@ public interface Column {
    * expression compatibility and reject writes as necessary.
    */
   @Nullable
-  String generationExpression();
+  GeneratedColumnSpec generatedColumnSpec();
 
   /**
    * Returns the identity column specification of this table column. Null means no identity column.

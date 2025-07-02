@@ -25,11 +25,10 @@ import org.apache.spark.sql.catalyst.trees.TreePattern.{ANALYSIS_AWARE_EXPRESSIO
 import org.apache.spark.sql.catalyst.util.{GeneratedColumn, IdentityColumn, V2ExpressionBuilder}
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.validateDefaultValueExpr
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumnsUtils.{CURRENT_DEFAULT_COLUMN_METADATA_KEY, EXISTS_DEFAULT_COLUMN_METADATA_KEY}
-import org.apache.spark.sql.connector.catalog.{Column => V2Column, ColumnDefaultValue, DefaultValue, IdentityColumnSpec}
+import org.apache.spark.sql.connector.catalog.{ColumnDefaultValue, DefaultValue, IdentityColumnSpec}
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits.MultipartIdentifierHelper
 import org.apache.spark.sql.connector.expressions.LiteralValue
 import org.apache.spark.sql.errors.QueryCompilationErrors
-import org.apache.spark.sql.internal.connector.ColumnImpl
 import org.apache.spark.sql.types.{DataType, Metadata, MetadataBuilder, StructField}
 
 /**
@@ -41,13 +40,16 @@ case class ColumnDefinition(
     dataType: DataType,
     nullable: Boolean = true,
     comment: Option[String] = None,
+    // todo: next 3 are mutually exclusive; should we make a hierarchy?
     defaultValue: Option[DefaultValueExpression] = None,
-    generationExpression: Option[String] = None,
+    generationExpression: Option[GeneratedColumnDef] = None,
     identityColumnSpec: Option[IdentityColumnSpec] = None,
     metadata: Metadata = Metadata.empty) extends Expression with Unevaluable {
-  assert(
-    generationExpression.isEmpty || identityColumnSpec.isEmpty,
-    "A ColumnDefinition cannot contain both a generation expression and an identity column spec.")
+
+  require( // todo: checked during AstBuilder. Eliminate later checks.
+    Seq(defaultValue, generationExpression, identityColumnSpec).count(_.isDefined) <= 1,
+    "A ColumnDefinition can have at most one of " +
+      "default value, generated column, or an identity column.")
 
   override def children: Seq[Expression] = defaultValue.toSeq
 
@@ -56,19 +58,8 @@ case class ColumnDefinition(
     copy(defaultValue = newChildren.headOption.map(_.asInstanceOf[DefaultValueExpression]))
   }
 
-  def toV2Column(statement: String): V2Column = {
-    ColumnImpl(
-      name,
-      dataType,
-      nullable,
-      comment.orNull,
-      defaultValue.map(_.toV2(statement, name)).orNull,
-      generationExpression.orNull,
-      identityColumnSpec.orNull,
-      if (metadata == Metadata.empty) null else metadata.json)
-  }
-
   def toV1Column: StructField = {
+    // todo: near duplicate code: CatalogV2Util.v2ColumnToStructField(toV2Column(""))
     val metadataBuilder = new MetadataBuilder().withMetadata(metadata)
     comment.foreach { c =>
       metadataBuilder.putString("comment", c)
@@ -83,12 +74,18 @@ case class ColumnDefinition(
       }
       metadataBuilder.putString(EXISTS_DEFAULT_COLUMN_METADATA_KEY, existsSQL)
     }
-    generationExpression.foreach { generationExpr =>
-      metadataBuilder.putString(GeneratedColumn.GENERATION_EXPRESSION_METADATA_KEY, generationExpr)
+    generationExpression.foreach { ge =>
+      require(!ge.virtual, "v1 tables do not support virtual columns") // todo: better error
+      metadataBuilder.putString(GeneratedColumn.GENERATION_EXPRESSION_METADATA_KEY, ge.captured.sql)
     }
     encodeIdentityColumnSpec(metadataBuilder)
     StructField(name, dataType, nullable, metadataBuilder.build())
   }
+
+  /**
+   * Return the basic name and type without the column metadata.
+   */
+  def toSimpleStructField: StructField = StructField(name, dataType, nullable)
 
   private def encodeIdentityColumnSpec(metadataBuilder: MetadataBuilder): Unit = {
     identityColumnSpec.foreach { spec: IdentityColumnSpec =>
@@ -103,6 +100,9 @@ case class ColumnDefinition(
 
 object ColumnDefinition {
 
+  // todo: this is nearly the same as
+  //    org.apache.spark.sql.connector.catalog.CatalogV2Util.structFieldToV2Column
+  //  yet they have some curious differences, eg other method does more validation.
   def fromV1Column(col: StructField, parser: ParserInterface): ColumnDefinition = {
     val metadataBuilder = new MetadataBuilder().withMetadata(col.metadata)
     metadataBuilder.remove("comment")
@@ -121,7 +121,11 @@ object ColumnDefinition {
     } else {
       None
     }
-    val generationExpr = GeneratedColumn.getGenerationExpression(col)
+    val generationExpr = GeneratedColumn.getGenerationExpression(col).map { sql =>
+        // todo: set origin?
+      val expr = parser.parseExpression(sql)
+      GeneratedColumnDef(CapturedExpression(sql, expr), virtual = false)
+    }
     val identityColumnSpec = if (col.metadata.contains(IdentityColumn.IDENTITY_INFO_START)) {
       Some(new IdentityColumnSpec(
         col.metadata.getLong(IdentityColumn.IDENTITY_INFO_START),
@@ -186,13 +190,14 @@ object ColumnDefinition {
   }
 
   private def checkDefaultColumnConflicts(col: ColumnDefinition): Unit = {
+    // todo: this is guarded by assertion in ColumnDefinition, so not needed
     if (col.generationExpression.isDefined) {
       throw new AnalysisException(
         errorClass = "GENERATED_COLUMN_WITH_DEFAULT_VALUE",
         messageParameters = Map(
           "colName" -> col.name,
           "defaultValue" -> col.defaultValue.get.originalSQL,
-          "genExpr" -> col.generationExpression.get
+          "genExpr" -> col.generationExpression.get.captured.sql
         )
       )
     }
@@ -247,4 +252,28 @@ case class DefaultValueExpression(
     case _ =>
       throw QueryCompilationErrors.defaultValueNotConstantError(statement, colName, originalSQL)
   }
+}
+
+/**
+ * Captures an expression and its parsed Expression tree, but hides the expression
+ * from analysis and rewrite.  The expression gets special analysis and additional handling
+ * during DDL statements.  For example, this is used by generated columns during create table
+ * commands.  We defer analysis to use a limited function catalog and to force configuration
+ * a stable meaning of the expression (e.g. ansi mode).
+ *
+ * @param sql The original sql text
+ * @param parsedExpr The parsed but unanalyzed expression tree.
+ */
+case class CapturedExpression(sql: String, parsedExpr: Expression)
+
+
+/**
+ * Defines a generated column as part of CREATE TABLE.
+ * @param captured The original sql text and the parsed expression.
+ * @param virtual true if the generated column is VIRTUAL, false if STORED.
+ */
+case class GeneratedColumnDef(captured: CapturedExpression,
+                              virtual: Boolean) {
+  require(!virtual, "virtual generated columns are not supported")
+  def stored: Boolean = !virtual
 }

@@ -220,6 +220,11 @@ class InMemoryTableCatalog extends BasicInMemoryTableCatalog with SupportsNamesp
   }
 
   override def namespaceExists(namespace: Array[String]): Boolean = {
+    // todo: does the empty namespace always exist?
+    //       right now, this code will say empty exists if any non-empty namespace exists
+    //       or if empty is explicitly registered.
+    //       I'm getting a hidden exception using empty namespace (it isn't created explicitly)
+    namespace.isEmpty ||
     allNamespaces.exists(_.startsWith(namespace))
   }
 

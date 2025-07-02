@@ -17,13 +17,17 @@
 
 package org.apache.spark.sql.catalyst.analysis
 
-import org.apache.spark.sql.catalyst.SQLConfHelper
-import org.apache.spark.sql.catalyst.expressions.{Alias, VariableReference}
+import scala.annotation.tailrec
+import org.apache.spark.sql.catalyst.{EvaluateUnresolvedInlineTable, SQLConfHelper}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Expression, NamedExpression, UnresolvedNamedLambdaVariable, VariableReference}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.trees.TreePattern.UNRESOLVED_ATTRIBUTE
-import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.{containsExplicitDefaultColumn, getDefaultValueExprOrNullLit, isExplicitDefaultColumn}
+import org.apache.spark.sql.catalyst.util.GeneratedColumn
+import org.apache.spark.sql.catalyst.util.GeneratedColumn.{failIfGenerateAlways, isGeneratedAlways}
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.{containsExplicitDefaultColumn, getDefaultOrIdentityOrThrow, isExplicitDefaultColumn}
 import org.apache.spark.sql.connector.catalog.CatalogManager
 import org.apache.spark.sql.errors.QueryCompilationErrors
+import org.apache.spark.sql.execution.datasources.v2.DataSourceV2RelationBase
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.StructField
 
@@ -46,7 +50,8 @@ class ResolveColumnDefaultInCommandInputQuery(val catalogManager: CatalogManager
   // TODO (SPARK-43752): support v2 write commands as well.
   def apply(plan: LogicalPlan): LogicalPlan = plan match {
     case i: InsertIntoStatement if conf.enableDefaultColumns && i.table.resolved &&
-        i.query.containsPattern(UNRESOLVED_ATTRIBUTE) =>
+        i.query.containsPattern(UNRESOLVED_ATTRIBUTE) &&
+        willExpandDefaults(i.query) =>
       val staticPartCols = i.partitionSpec.filter(_._2.isDefined).keySet.map(normalizeFieldName)
       // For INSERT with static partitions, such as `INSERT INTO t PARTITION(c=1) SELECT ...`, the
       // input query schema should match the table schema excluding columns with static
@@ -62,24 +67,47 @@ class ResolveColumnDefaultInCommandInputQuery(val catalogManager: CatalogManager
       // To simplify the implementation, `resolveColumnDefault` always does by-position match. If
       // the INSERT has a column list, we reorder the table schema w.r.t. the column list and pass
       // the reordered schema as the expected schema to `resolveColumnDefault`.
-      if (i.userSpecifiedCols.isEmpty) {
+
+      // todo: is there any way query.output can fail, given the conditions of willFire?
+      //   we need to delay firing until star-like expressions are expanded, along
+      //   with
+      val specifiedNames =
+        if (i.byName) i.query.output.map(_.name)
+        else i.userSpecifiedCols
+
+      if (specifiedNames.isEmpty) {
         i.withNewChildren(Seq(resolveColumnDefault(i.query, expectedQuerySchema)))
       } else {
-        val colNamesToFields: Map[String, StructField] = expectedQuerySchema.map { field =>
-          normalizeFieldName(field.name) -> field
-        }.toMap
-        val reorder = i.userSpecifiedCols.map { col =>
-          colNamesToFields.get(normalizeFieldName(col))
+        val colNamesToFields: Map[String, StructField] =
+          expectedQuerySchema.map { field =>
+            normalizeFieldName(field.name) -> field
+          }.toMap
+        val orderedFields = specifiedNames.map { col =>
+          colNamesToFields.getOrElse(normalizeFieldName(col), {
+            val extraColumns =
+              specifiedNames.filterNot(n => colNamesToFields.contains(normalizeFieldName(n))).
+                  map(toSQLId).mkString(", ")
+            throw QueryCompilationErrors.incompatibleDataToTableExtraColumnsError(
+              i.table.asInstanceOf[DataSourceV2RelationBase].name,
+              extraColumns = extraColumns)
+          })
         }
-        if (reorder.forall(_.isDefined)) {
-          i.withNewChildren(Seq(resolveColumnDefault(i.query, reorder.flatten)))
+
+        val withDefaults = resolveColumnDefault(i.query, orderedFields)
+
+        if (i.byName) {
+          i.copy(query = withDefaults)
         } else {
-          i
+          // GENERATED ALWAYS fields are removed, so we remove their names too.
+          val names = orderedFields.filterNot(GeneratedColumn.isGeneratedAlways).map(_.name)
+          // todo: should we preserve original case of names?
+          i.copy(userSpecifiedCols = names, query = withDefaults)
         }
       }
 
     case s: SetVariable if s.targetVariables.forall(_.isInstanceOf[VariableReference]) &&
-        s.sourceQuery.containsPattern(UNRESOLVED_ATTRIBUTE) =>
+        s.sourceQuery.containsPattern(UNRESOLVED_ATTRIBUTE) &&
+        willExpandDefaults(s.sourceQuery) =>
       val expectedQuerySchema = s.targetVariables.map {
         case v: VariableReference =>
           StructField(v.identifier.name, v.dataType, v.nullable)
@@ -92,6 +120,29 @@ class ResolveColumnDefaultInCommandInputQuery(val catalogManager: CatalogManager
 
     case _ => plan
   }
+
+  @tailrec
+  private def willExpandDefaults(plan: LogicalPlan): Boolean = {
+    plan match {
+      case a: SubqueryAlias => willExpandDefaults(a.child)
+      case p: Project =>
+        p.child.resolved &&
+            attributesReady(p.projectList) &&
+            willFire(p.projectList)
+      case inlineTable: UnresolvedInlineTable =>
+        willFire(inlineTable.expressions)
+      case _ => false
+    }
+  }
+
+
+  // todo: existing master code has issues:
+  //       with case _: Project | _: Aggregate if acceptInlineTable =>
+  //       and with Project with defaults recursing
+  //   see https://databricks.slack.com/archives/D08NCPS5XPA/p1750876852122259
+  // todo: also, drop support for DEFAULT in SELECT + (ORDER | LIMIT | OFFSET) ?
+  //   it requires defaults to be in place to order on, but the defaults
+  //   shouldn't be evaluated until after these operations, ie at insert.
 
   /**
    * Resolves the column "DEFAULT" in [[Project]] and [[UnresolvedInlineTable]]. A column is a
@@ -107,59 +158,124 @@ class ResolveColumnDefaultInCommandInputQuery(val catalogManager: CatalogManager
    *    all unary nodes that inherit the output columns from its child.
    * 4. The plan nodes between [[UnresolvedInlineTable]] and [[InsertIntoStatement]] are either
    *    [[Project]], or [[Aggregate]], or [[SubqueryAlias]].
+   *
+   *  The purpose is:
+   *  1. Fill in expression for DEFAULT VALUE and "GENERATED BY DEFAULT AS IDENTITY".
+   *  2. Validate GENERATED ALWAYS AS (expr | IDENTITY) columns are all default, and
+   *     remove them. The will be filled in later by
+   *     org.apache.spark.sql.catalyst.analysis.TableOutputResolver.resolveOutputColumns
    */
   private def resolveColumnDefault(
       plan: LogicalPlan,
-      expectedQuerySchema: Seq[StructField],
-      acceptProject: Boolean = true,
-      acceptInlineTable: Boolean = true): LogicalPlan = {
+      expectedQuerySchema: Seq[StructField]): LogicalPlan = {
+
     plan match {
-      case _: SubqueryAlias =>
-        plan.mapChildren(
-          resolveColumnDefault(_, expectedQuerySchema, acceptProject, acceptInlineTable))
+      case a: SubqueryAlias =>
+        a.mapChildren(resolveColumnDefault(_, expectedQuerySchema))
 
-      case _: GlobalLimit | _: LocalLimit | _: Offset | _: Sort if acceptProject =>
-        plan.mapChildren(
-          resolveColumnDefault(_, expectedQuerySchema, acceptInlineTable = false))
-
-      case p: Project if acceptProject && p.child.resolved &&
-          p.containsPattern(UNRESOLVED_ATTRIBUTE) &&
-          p.projectList.length <= expectedQuerySchema.length =>
-        val newProjectList = p.projectList.zipWithIndex.map {
-          case (u: UnresolvedAttribute, i) if isExplicitDefaultColumn(u) =>
-            Alias(getDefaultValueExprOrNullLit(expectedQuerySchema(i)), u.name)()
-          case (other, _) if containsExplicitDefaultColumn(other) =>
-            throw QueryCompilationErrors
-              .defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
-          case (other, _) => other
-        }
-        val newChild = resolveColumnDefault(p.child, expectedQuerySchema, acceptProject = false)
-        val newProj = p.copy(projectList = newProjectList, child = newChild)
+      case p: Project =>
+        // guaranteed by caller: p.child.resolved && willFire(p.projectList)
+        // todo: there is an ambiguity when p.child has a column named "default".
+        //       the sql standard has as strict DEFAULT keyword
+        //       and requires quoting to get a field named `default`.
+        val newProjectList =
+          expandDefaultInRow(p.projectList, expectedQuerySchema, (e, name) => Alias(e, name)())
+        val newProj = p.copy(projectList = newProjectList, child = p.child)
         newProj.copyTagsFrom(p)
         newProj
 
-      case _: Project | _: Aggregate if acceptInlineTable =>
-        plan.mapChildren(resolveColumnDefault(_, expectedQuerySchema, acceptProject = false))
-
-      case inlineTable: UnresolvedInlineTable if acceptInlineTable &&
-          inlineTable.containsPattern(UNRESOLVED_ATTRIBUTE) &&
-          inlineTable.rows.forall(exprs => exprs.length <= expectedQuerySchema.length) =>
-        val newRows = inlineTable.rows.map { exprs =>
-          exprs.zipWithIndex.map {
-            case (u: UnresolvedAttribute, i) if isExplicitDefaultColumn(u) =>
-              getDefaultValueExprOrNullLit(expectedQuerySchema(i))
-            case (other, _) if containsExplicitDefaultColumn(other) =>
-              throw QueryCompilationErrors
-                .defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
-            case (other, _) => other
-          }
+      // todo: is this true UnresolvedInlineTable.rows.forall(_.length == names.length) ?
+      //       add require or at least doc in UnresolvedInlineTable.
+      //       and change check below to just check names.
+      case inlineTable: UnresolvedInlineTable =>
+        // guaranteed by caller: willFire(inlineTable.expressions)
+        // better error if inline table is wonky
+        EvaluateUnresolvedInlineTable.validateInputDimension(inlineTable)
+        val unnamed = (e: Expression, _: String) => e
+        val newRows = inlineTable.rows.map { row =>
+          expandDefaultInRow(row, expectedQuerySchema, unnamed)
         }
-        val newInlineTable = inlineTable.copy(rows = newRows)
+
+        val (names, extraNames) = inlineTable.names.splitAt(expectedQuerySchema.length)
+        val keepNames = names.zip(expectedQuerySchema).
+            filterNot(p => isGeneratedAlways(p._2)).map(_._1) ++ extraNames
+        val newInlineTable = inlineTable.copy(rows = newRows, names = keepNames)
         newInlineTable.copyTagsFrom(inlineTable)
         newInlineTable
-
-      case other => other
     }
+  }
+
+  private def attributesReady(exprs: Seq[NamedExpression]): Boolean = {
+    exprs.forall { e =>
+      e.resolved || (
+          e match {
+            case _: Star |
+                 _: MultiAlias |
+                 _: UnresolvedAlias |
+                 _: UnresolvedNamedLambdaVariable => false
+            case _ => true
+          })
+    }
+  }
+
+  private def willFire(exprs: Seq[Expression]): Boolean = {
+    // we will fire on something
+    exprs.exists(containsExplicitDefaultColumn) &&
+        // we are ready to fire
+        exprs.forall(e => e.resolved || containsExplicitDefaultColumn(e))
+  }
+
+
+  private def expandDefaultInRow[T <: Expression](
+      exprs: Seq[T],
+      expectedQuerySchema: Seq[StructField],
+      setName: (Expression, String) => T): Seq[T] = {
+    val fields = expectedQuerySchema.iterator
+    exprs.flatMap { e =>
+      if (fields.hasNext) {
+        val field = fields.next()
+        e match {
+          case u: UnresolvedAttribute if isExplicitDefaultColumn(u) =>
+            expandDefault(field).map(setName(_, u.name))
+          case a @ Alias(u: UnresolvedAttribute, name) if isExplicitDefaultColumn(u) =>
+            expandDefault(field).map(setName(_, name))
+          case other =>
+            nonDefault(other, field)
+        }
+      } else {
+        unexpectedExpr(e)
+      }
+    }
+  }
+
+  private def expandDefault(field: StructField): Option[Expression] = {
+    Option.when(!isGeneratedAlways(field)) { // Drop DEFAULT for GENERATE ALWAYS
+      getDefaultOrIdentityOrThrow(field, useNullAsDefault = true)
+    }
+  }
+
+  private def nonDefault[E <: Expression](expr: E, field: StructField): Option[E] = {
+    if (containsExplicitDefaultColumn(expr)) {
+      // todo: if (expr.isInstanceOf[UnresolvedAttribute])
+      //       the column doesn't have a default
+      //       or the default is not complex; it didn't match
+      throw QueryCompilationErrors
+          .defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
+    }
+    failIfGenerateAlways(field)
+    Some(expr)
+  }
+
+  private def unexpectedExpr[T <: Expression](expr: T): Option[T] = {
+    if (containsExplicitDefaultColumn(expr)) {
+      // todo: better error: DEFAULT did not match a column
+      throw QueryCompilationErrors
+          .defaultReferencesNotAllowedInComplexExpressionsInInsertValuesList()
+    }
+    Some(expr)
+  }
+
+  private def failIfContainsDefault(expr: Expression): Unit = {
   }
 
   /**

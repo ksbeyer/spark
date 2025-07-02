@@ -2869,6 +2869,9 @@ class DDLParserSuite extends AnalysisTest {
         fragment = "b STRING COMMENT \"abc\" NOT NULL COMMENT \"abc\"", start = 27, stop = 71))
   }
 
+  def mkGenCol(sql: String, virtual: Boolean = false): GeneratedColumnDef =
+    GeneratedColumnDef(CapturedExpression(sql, parseExpression(sql)), virtual)
+
   test("SPARK-41290: implement parser support for GENERATED ALWAYS AS columns in tables") {
     val columnsWithGenerationExpr = Seq(
       ColumnDefinition("a", IntegerType),
@@ -2876,7 +2879,7 @@ class DDLParserSuite extends AnalysisTest {
         "b",
         IntegerType,
         nullable = false,
-        generationExpression = Some("a+1")
+        generationExpression = Some(mkGenCol("a+1"))
       )
     )
     comparePlans(parsePlan(
@@ -2894,11 +2897,22 @@ class DDLParserSuite extends AnalysisTest {
       exception = parseException("CREATE TABLE my_tab(a INT, " +
           "b INT GENERATED ALWAYS AS (a + 1) GENERATED ALWAYS AS (a + 2)) USING PARQUET"),
       condition = "CREATE_TABLE_COLUMN_DESCRIPTOR_DUPLICATE",
-      parameters = Map("columnName" -> "b", "optionName" -> "GENERATED ALWAYS AS"),
+      parameters = Map("columnName" -> "b", "optionName" -> "GENERATED"),
       context = ExpectedContext(
         fragment = "b INT GENERATED ALWAYS AS (a + 1) GENERATED ALWAYS AS (a + 2)",
         start = 27,
         stop = 87
+      )
+    )
+    checkError(
+      exception = parseException("CREATE TABLE my_tab(a INT, " +
+          "b INT GENERATED ALWAYS AS (a + 1) GENERATED ALWAYS AS IDENTITY) USING PARQUET"),
+      condition = "CREATE_TABLE_COLUMN_DESCRIPTOR_DUPLICATE",
+      parameters = Map("columnName" -> "b", "optionName" -> "GENERATED"),
+      context = ExpectedContext(
+        fragment = "b INT GENERATED ALWAYS AS (a + 1) GENERATED ALWAYS AS IDENTITY",
+        start = 27,
+        stop = 88
       )
     )
     // Empty expression

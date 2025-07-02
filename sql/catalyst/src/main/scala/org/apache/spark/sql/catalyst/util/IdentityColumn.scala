@@ -17,6 +17,7 @@
 
 package org.apache.spark.sql.catalyst.util
 
+import org.apache.spark.sql.catalyst.plans.logical.ColumnDefinition
 import org.apache.spark.sql.connector.catalog.{Identifier, IdentityColumnSpec, TableCatalog, TableCatalogCapability}
 import org.apache.spark.sql.errors.QueryCompilationErrors
 import org.apache.spark.sql.types.{StructField, StructType}
@@ -38,13 +39,28 @@ object IdentityColumn {
       catalog: TableCatalog,
       ident: Identifier): Unit = {
     if (hasIdentityColumns(schema)) {
-      if (!catalog
-          .capabilities()
-          .contains(TableCatalogCapability.SUPPORTS_CREATE_TABLE_WITH_IDENTITY_COLUMNS)) {
-        throw QueryCompilationErrors.unsupportedTableOperationError(
-          catalog, ident, operation = "identity column"
-        )
-      }
+      validateCapability(catalog, ident)
+    }
+  }
+
+  def validateIdentityColumns(
+      columns: Seq[ColumnDefinition],
+      catalog: TableCatalog,
+      ident: Identifier): Unit = {
+    if (columns.exists(_.identityColumnSpec.isDefined)) {
+      validateCapability(catalog, ident)
+    }
+  }
+
+  private def validateCapability(
+      catalog: TableCatalog,
+      ident: Identifier): Unit = {
+    if (!catalog
+        .capabilities()
+        .contains(TableCatalogCapability.SUPPORTS_CREATE_TABLE_WITH_IDENTITY_COLUMNS)) {
+      throw QueryCompilationErrors.unsupportedTableOperationError(
+        catalog, ident, operation = "identity column"
+      )
     }
   }
 

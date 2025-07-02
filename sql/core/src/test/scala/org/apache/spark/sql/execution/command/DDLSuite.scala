@@ -2364,7 +2364,7 @@ abstract class DDLSuite extends QueryTest with DDLSuiteBase {
     }
   }
 
-  test("SPARK-41290: No generated columns with V1") {
+  test("SPARK-41290: No generated columns with V1") { // todo: move to GC suite?
     checkError(
       exception = intercept[AnalysisException] {
         sql(s"create table t(a int, b int generated always as (a + 1)) using parquet")

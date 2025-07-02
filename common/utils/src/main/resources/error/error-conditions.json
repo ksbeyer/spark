@@ -35,6 +35,24 @@
     ],
     "sqlState" : "42710"
   },
+  "ALTER_TABLE_AFFECTS_UNEVALUABLE_EXPRESSION" : {
+    "message" : [
+      "Table <tableName> has an unevaluable expression in <category> <name> that might be affected by this ALTER command."
+    ],
+    "sqlState" : "?? 42710 ??"
+  },
+  "ALTER_TABLE_AFFECTS_EXPRESSION" : {
+    "message" : [
+      "ALTER TABLE <tableName> (ALTER|CHANGE) COLUMN <columnName> is not supported because it would affect <category> <usedBy>."
+    ],
+    "sqlState" : "?? 42710 ??"
+  },
+  "ALTER_TABLE_CANNOT_ALTER_GENERATED_COLUMN" : {
+    "message" : [
+      "ALTER TABLE <tableName> (ALTER|CHANGE) COLUMN <columnName> is not allowed to change properties of generated columns."
+    ],
+    "sqlState" : "?? 42710 ??"
+  },
   "AMBIGUOUS_ALIAS_IN_NESTED_CTE" : {
     "message" : [
       "Name <name> is ambiguous in nested CTE.",
@@ -1594,6 +1612,12 @@
     ],
     "sqlState" : "42846"
   },
+  "EXPRESSION_NOT_EVALUABLE" : {
+    "message" : [
+      "The expression of table <tableName> <category> <name> is not evaluable due to: <reason> "
+    ],
+    "sqlState" : "?? 42846 ??"
+  },
   "EXPRESSION_TYPE_IS_NOT_ORDERABLE" : {
     "message" : [
       "Column expression <expr> cannot be sorted because its type <exprType> is not orderable."
@@ -1824,7 +1848,7 @@
   },
   "GENERATED_COLUMN_WITH_DEFAULT_VALUE" : {
     "message" : [
-      "A column cannot have both a default value and a generation expression but column <colName> has default value: (<defaultValue>) and generation expression: (<genExpr>)."
+      "Column <columnName> cannot have both a default value and a generation expression."
     ],
     "sqlState" : "42623"
   },
@@ -1968,12 +1992,6 @@
       "DataType <dataType> is not supported for IDENTITY columns."
     ],
     "sqlState" : "428H2"
-  },
-  "IDENTITY_COLUMN_WITH_DEFAULT_VALUE" : {
-    "message" : [
-      "A column cannot have both a default value and an identity column specification but column <colName> has default value: (<defaultValue>) and identity column specification: (<identityColumnSpec>)."
-    ],
-    "sqlState" : "42623"
   },
   "ILLEGAL_DAY_OF_WEEK" : {
     "message" : [

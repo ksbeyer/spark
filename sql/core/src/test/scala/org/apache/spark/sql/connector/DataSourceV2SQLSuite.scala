@@ -1554,6 +1554,14 @@ class DataSourceV2SQLSuiteV1Filter
         // Can create table with a generated column
         sql(s"$statement testcat.$tableDefinition USING foo")
         assert(catalog("testcat").asTableCatalog.tableExists(Identifier.of(Array(), tblName)))
+        // Can get the definition back
+        val table = catalog("testcat").asTableCatalog.loadTable(Identifier.of(Array(), tblName))
+        assert(table.columns()(0).generatedColumnSpec() eq null)
+        val gc = table.columns()(1).generatedColumnSpec()
+        val gce = gc.expression()
+        assert(gce.getSql == "year(eventDate)")
+        assert(gce.getExpression.toString == "EXTRACT(YEAR FROM eventDate)")
+        assert(!gc.virtual())
       }
       // BasicInMemoryTableCatalog.capabilities() = {}
       withSQLConf("spark.sql.catalog.dummy" -> classOf[BasicInMemoryTableCatalog].getName) {
@@ -1565,7 +1573,7 @@ class DataSourceV2SQLSuiteV1Filter
           condition = "UNSUPPORTED_FEATURE.TABLE_OPERATION",
           parameters = Map(
             "tableName" -> "`dummy`.`my_tab`",
-            "operation" -> "generated columns"
+            "operation" -> "stored generated columns"
           )
         )
       }
@@ -1579,16 +1587,18 @@ class DataSourceV2SQLSuiteV1Filter
     withSQLConf(SQLConf.DEFAULT_COLUMN_ALLOWED_PROVIDERS.key -> "foo") {
       for (statement <- Seq("CREATE TABLE", "REPLACE TABLE")) {
         withTable(s"testcat.$tblName") {
+          var offset = 0
           if (statement == "REPLACE TABLE") {
+            offset = 1
             sql(s"CREATE TABLE testcat.$tblName(a INT) USING foo")
           }
           checkError(
             exception = analysisException(s"$statement testcat.$tableDefinition USING foo"),
             condition = "GENERATED_COLUMN_WITH_DEFAULT_VALUE",
-            parameters = Map(
-              "colName" -> "eventYear",
-              "defaultValue" -> "0",
-              "genExpr" -> "year(eventDate)")
+            parameters = Map("columnName" -> "eventYear"),
+            queryContext = Array(ExpectedContext(
+              "eventYear INT GENERATED ALWAYS AS (year(eventDate)) DEFAULT 0",
+              44 + offset, 104 + offset))
           )
         }
       }
@@ -1650,7 +1660,7 @@ class DataSourceV2SQLSuiteV1Filter
               "b INT GENERATED ALWAYS AS (B + 1)) USING foo"),
           condition = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
           parameters = Map("objectName" -> "`B`", "proposal" -> "`a`"),
-          context = ExpectedContext(fragment = "B", start = 0, stop = 0)
+          context = ExpectedContext(fragment = "B", start = 62, stop = 62)
         )
       }
     }
@@ -1707,14 +1717,14 @@ class DataSourceV2SQLSuiteV1Filter
           s"ALWAYS AS (c + 1)) USING foo"),
         condition = "UNRESOLVED_COLUMN.WITH_SUGGESTION",
         parameters = Map("objectName" -> "`c`", "proposal" -> "`a`"),
-        context = ExpectedContext(fragment = "c", start = 0, stop = 0)
+        context = ExpectedContext(fragment = "c", start = 62, stop = 62)
       )
     }
 
     // Expression must be deterministic
     checkUnsupportedGenerationExpression(
       "rand()",
-      "generation expression is not deterministic"
+      "expression must be deterministic"
     )
 
     // Data type is incompatible
@@ -1732,26 +1742,26 @@ class DataSourceV2SQLSuiteV1Filter
     // No subquery expressions
     checkUnsupportedGenerationExpression(
       "(SELECT 1)",
-      "subquery expressions are not allowed for generated columns"
+      "subquery expressions are not allowed"
     )
     checkUnsupportedGenerationExpression(
       "(SELECT (SELECT 2) + 1)", // nested
-      "subquery expressions are not allowed for generated columns"
+      "subquery expressions are not allowed"
     )
     checkUnsupportedGenerationExpression(
       "(SELECT 1) + a", // refers to another column
-      "subquery expressions are not allowed for generated columns"
+      "subquery expressions are not allowed"
     )
     withTable("other") {
       sql("create table other(x INT) using parquet")
       checkUnsupportedGenerationExpression(
         "(select min(x) from other)", // refers to another table
-        "subquery expressions are not allowed for generated columns"
+        "subquery expressions are not allowed"
       )
     }
     checkUnsupportedGenerationExpression(
       "(select min(x) from faketable)", // refers to a non-existent table
-      "subquery expressions are not allowed for generated columns"
+      "subquery expressions are not allowed"
     )
   }
 
@@ -1780,17 +1790,18 @@ class DataSourceV2SQLSuiteV1Filter
     withSQLConf(SQLConf.DEFAULT_COLUMN_ALLOWED_PROVIDERS.key -> "foo") {
       for (statement <- Seq("CREATE TABLE", "REPLACE TABLE")) {
         withTable(s"testcat.$tblName") {
+          var offset = 0
           if (statement == "REPLACE TABLE") {
+            offset = 1
             sql(s"CREATE TABLE testcat.$tblName(a INT) USING foo")
           }
           checkError(
             exception = analysisException(s"$statement testcat.$tableDefinition USING foo"),
-            condition = "IDENTITY_COLUMN_WITH_DEFAULT_VALUE",
-            parameters = Map(
-              "colName" -> "id",
-              "defaultValue" -> "0",
-              "identityColumnSpec" ->
-                "IdentityColumnSpec{start=1, step=1, allowExplicitInsert=false}")
+            condition = "GENERATED_COLUMN_WITH_DEFAULT_VALUE",
+            parameters = Map("columnName" -> "id"),
+            queryContext = Array(ExpectedContext(
+              "id BIGINT GENERATED ALWAYS AS IDENTITY DEFAULT 0",
+              28 + offset, 75 + offset))
           )
         }
       }

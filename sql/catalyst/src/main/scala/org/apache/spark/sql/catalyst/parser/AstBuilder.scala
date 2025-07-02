@@ -3964,14 +3964,6 @@ class AstBuilder extends DataTypeAstBuilder
   }
 
   /**
-   * Create top level table schema.
-   */
-  protected def createSchema(ctx: TableElementListContext): StructType = {
-    val (cols, _) = visitTableElementList(ctx)
-    StructType(cols.map(_.toV1Column))
-  }
-
-  /**
    * Get CREATE TABLE column definitions.
    */
   override def visitColDefinitionList(
@@ -4011,12 +4003,18 @@ class AstBuilder extends DataTypeAstBuilder
           throw QueryParsingErrors.duplicateTableColumnDescriptor(
             option, name, "DEFAULT")
         }
+        if (generationExpression.isDefined) {
+          throw QueryParsingErrors.generatedWithDefault(option, name)
+        }
         defaultExpression = Some(expr)
       }
       Option(option.generationExpression()).foreach { expr =>
         if (generationExpression.isDefined) {
           throw QueryParsingErrors.duplicateTableColumnDescriptor(
-            option, name, "GENERATED ALWAYS AS")
+            option, name, "GENERATED")
+        }
+        if (defaultExpression.isDefined) {
+          throw QueryParsingErrors.generatedWithDefault(option, name)
         }
         generationExpression = Some(expr)
       }
@@ -4150,9 +4148,12 @@ class AstBuilder extends DataTypeAstBuilder
   /**
    * Create a generation expression string.
    */
-  override def visitGeneratedColumn(ctx: GeneratedColumnContext): String =
+  override def visitGeneratedColumn(ctx: GeneratedColumnContext): GeneratedColumnDef =
     withOrigin(ctx) {
-      getDefaultExpression(ctx.expression(), "GENERATED").originalSQL
+      val exprCtx = ctx.expression()
+      val sql = getOriginalText(exprCtx)
+      val expr = expression(exprCtx)
+      GeneratedColumnDef(CapturedExpression(sql, expr), virtual = false)
     }
 
   /**

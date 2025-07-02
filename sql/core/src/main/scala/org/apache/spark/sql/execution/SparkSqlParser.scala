@@ -39,7 +39,7 @@ import org.apache.spark.sql.execution.command._
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.internal.{HiveSerDe, SQLConf, VariableSubstitution}
 import org.apache.spark.sql.internal.StaticSQLConf.CATALOG_IMPLEMENTATION
-import org.apache.spark.sql.types.StringType
+import org.apache.spark.sql.types.{StringType, StructType}
 import org.apache.spark.util.Utils.getUriBuilder
 
 /**
@@ -365,15 +365,19 @@ class SparkSqlAstBuilder extends AstBuilder {
         visitCreateTableClauses(ctx.createTableClauses())
       val provider = Option(ctx.tableProvider).map(_.multipartIdentifier.getText).getOrElse(
         throw QueryParsingErrors.createTempTableNotSpecifyProviderError(ctx))
-      val schema = Option(ctx.tableElementList()).map(createSchema)
 
-      if (ctx.tableProvider != null
-        && conf.getConf(SQLConf.BLOCK_CREATE_TEMP_TABLE_USING_PROVIDER)) {
+      if (conf.getConf(SQLConf.BLOCK_CREATE_TEMP_TABLE_USING_PROVIDER)) {
         throw QueryParsingErrors.createTempTableUsingProviderError(ctx)
-      }
-      else {
+      } else {
         logWarning(s"CREATE TEMPORARY TABLE ... USING ... is deprecated, please use " +
           "CREATE TEMPORARY VIEW ... USING ... instead")
+      }
+
+      val schema = Option(ctx.tableElementList()).map { tc =>
+        val (cols, _) = visitTableElementList(tc)
+        // todo: should this validate cols have no generation?
+        // todo: should this validate no constraints?
+        StructType(cols.map(_.toSimpleStructField))
       }
 
       withIdentClause(identCtx, ident => {

@@ -52,6 +52,8 @@ public interface Table {
   /**
    * Returns the schema of this table. If the table is not readable and doesn't have a schema, an
    * empty schema can be returned here.
+   * todo: does this definitely include / not include v1 field metadata? or is it dealers choice?
+   *
    * <p>
    * @deprecated This is deprecated. Please override {@link #columns} instead.
    */

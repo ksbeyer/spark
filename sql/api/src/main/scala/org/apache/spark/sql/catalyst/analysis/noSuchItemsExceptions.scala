@@ -220,3 +220,17 @@ class CannotReplaceMissingTableException(
           -> quoteNameParts(
             (tableIdentifier.namespace :+ tableIdentifier.name).toImmutableArraySeq)),
       cause = cause)
+
+class ExpressionNotEvaluable(
+    tableIdentifier: Identifier,
+    category: String,
+    name: String,
+    reason: String)
+    extends AnalysisException(
+      errorClass = "EXPRESSION_NOT_EVALUABLE",
+      messageParameters = Map(
+        "tableName" -> quoteNameParts(
+          (tableIdentifier.namespace :+ tableIdentifier.name).toImmutableArraySeq),
+        "category" -> category,
+        "name" -> name,
+        "reason" -> reason))

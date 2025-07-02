@@ -388,14 +388,19 @@ private[sql] object HoursTransform {
   }
 }
 
+// todo: is value.toString always valid sql? V2ExpressionSQLBuilder assumes so.
 private[sql] final case class LiteralValue[T](value: T, dataType: DataType) extends Literal[T] {
   override def toString: String = dataType match {
     case StringType => s"'${StringUtils.replace(s"$value", "'", "''")}'"
     case BinaryType =>
+      // todo: why assert then cast.  just let it hit the cast exception.
       assert(value.isInstanceOf[Array[Byte]])
       val bytes = value.asInstanceOf[Array[Byte]]
+      // todo: this is not a valid sql binary (spark or ansi); should be x'deadbeef'
       "0x" + Hex.encodeHexString(bytes, false)
-    case _ => s"$value"
+    case _ =>
+      // todo: this is probably not sufficient...
+      s"$value"
   }
 }
 

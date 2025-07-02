@@ -32,10 +32,9 @@ import org.apache.spark.sql.catalyst.expressions.{And, Attribute, DynamicPruning
 import org.apache.spark.sql.catalyst.expressions.Literal.TrueLiteral
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.util.{toPrettySQL, GeneratedColumn, IdentityColumn, ResolveDefaultColumns, ResolveTableConstraints, V2ExpressionBuilder}
+import org.apache.spark.sql.catalyst.util.{toPrettySQL, GeneratedColumnV2, IdentityColumn, ResolveDefaultColumns, ResolveTableConstraints, V2ExpressionBuilder}
 import org.apache.spark.sql.classic.SparkSession
-import org.apache.spark.sql.connector.catalog.{Identifier, StagingTableCatalog, SupportsDeleteV2, SupportsNamespaces, SupportsPartitionManagement, SupportsWrite, Table, TableCapability, TableCatalog, TruncatableTable}
-import org.apache.spark.sql.connector.catalog.TableChange
+import org.apache.spark.sql.connector.catalog.{Column, Identifier, StagingTableCatalog, SupportsDeleteV2, SupportsNamespaces, SupportsPartitionManagement, SupportsWrite, Table, TableCapability, TableCatalog, TableChange, TruncatableTable}
 import org.apache.spark.sql.connector.catalog.index.SupportsIndex
 import org.apache.spark.sql.connector.expressions.{FieldReference, LiteralValue}
 import org.apache.spark.sql.connector.expressions.filter.{And => V2And, Not => V2Not, Or => V2Or, Predicate}
@@ -49,7 +48,9 @@ import org.apache.spark.sql.execution.datasources.{DataSourceStrategy, LogicalRe
 import org.apache.spark.sql.execution.streaming.continuous.{WriteToContinuousDataSource, WriteToContinuousDataSourceExec}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.internal.StaticSQLConf.WAREHOUSE_PATH
+import org.apache.spark.sql.internal.connector.ColumnImpl
 import org.apache.spark.sql.sources.{BaseRelation, TableScan}
+import org.apache.spark.sql.types.Metadata
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.ArrayImplicits._
 
@@ -57,6 +58,7 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
 
   import DataSourceV2Implicits._
   import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
+  import DataSourceV2Strategy._
 
   private def hadoopConf = session.sessionState.newHadoopConf()
 
@@ -184,21 +186,18 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
       }
       WriteToDataSourceV2Exec(writer, invalidateCacheFunc, planLater(query), customMetrics) :: Nil
 
-    case c @ CreateTable(ResolvedIdentifier(catalog, ident), columns, partitioning,
+    case c @ CreateTable(ResolvedIdentifier(catalog, ident), columnDefs, partitioning,
         tableSpec: TableSpec, ifNotExists) =>
       val tableCatalog = catalog.asTableCatalog
-      ResolveDefaultColumns.validateCatalogForDefaultValue(columns, tableCatalog, ident)
       ResolveTableConstraints.validateCatalogForTableConstraint(
         tableSpec.constraints, tableCatalog, ident)
       val statementType = "CREATE TABLE"
-      GeneratedColumn.validateGeneratedColumns(
-        c.tableSchema, tableCatalog, ident, statementType)
-      IdentityColumn.validateIdentityColumn(c.tableSchema, tableCatalog, ident)
+      val columns = prepareColumns(columnDefs, tableCatalog, ident, statementType)
 
       CreateTableExec(
         catalog.asTableCatalog,
         ident,
-        columns.map(_.toV2Column(statementType)).toArray,
+        columns,
         partitioning,
         qualifyLocInTableSpec(tableSpec),
         ifNotExists) :: Nil
@@ -218,23 +217,18 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
       RefreshTableExec(r.catalog, r.identifier, recacheTable(r)) :: Nil
 
     case c @ ReplaceTable(
-        ResolvedIdentifier(catalog, ident), columns, parts, tableSpec: TableSpec, orCreate) =>
+        ResolvedIdentifier(catalog, ident), columnDefs, parts, tableSpec: TableSpec, orCreate) =>
       val tableCatalog = catalog.asTableCatalog
-      ResolveDefaultColumns.validateCatalogForDefaultValue(columns, tableCatalog, ident)
       ResolveTableConstraints.validateCatalogForTableConstraint(
         tableSpec.constraints, tableCatalog, ident)
       val statementType = "REPLACE TABLE"
-      GeneratedColumn.validateGeneratedColumns(
-        c.tableSchema, tableCatalog, ident, statementType)
-      IdentityColumn.validateIdentityColumn(c.tableSchema, tableCatalog, ident)
-
-      val v2Columns = columns.map(_.toV2Column(statementType)).toArray
+      val columns = prepareColumns(columnDefs, tableCatalog, ident, statementType)
       catalog match {
         case staging: StagingTableCatalog =>
-          AtomicReplaceTableExec(staging, ident, v2Columns, parts,
+          AtomicReplaceTableExec(staging, ident, columns, parts,
             qualifyLocInTableSpec(tableSpec), orCreate = orCreate, invalidateCache) :: Nil
         case _ =>
-          ReplaceTableExec(tableCatalog, ident, v2Columns, parts,
+          ReplaceTableExec(tableCatalog, ident, columns, parts,
             qualifyLocInTableSpec(tableSpec), orCreate = orCreate, invalidateCache) :: Nil
       }
 
@@ -547,11 +541,13 @@ class DataSourceV2Strategy(session: SparkSession) extends Strategy with Predicat
       ResolveTableConstraints.validateCatalogForTableChange(Seq(change), catalog, ident)
       AddCheckConstraintExec(catalog, ident, change, condition, planLater(a.child)) :: Nil
 
-    case a: AlterTableCommand if a.table.resolved =>
-      val table = a.table.asInstanceOf[ResolvedTable]
+    case cmd: AlterTableCommand if cmd.table.resolved =>
+      val table = cmd.table.asInstanceOf[ResolvedTable]
       ResolveTableConstraints.validateCatalogForTableChange(
-        a.changes, table.catalog, table.identifier)
-      AlterTableExec(table.catalog, table.identifier, a.changes) :: Nil
+        cmd.changes, table.catalog, table.identifier)
+      // verify column changes do not affect undropped generated columns and check constraints.
+      GeneratedColumnV2.validateExpressionsInAlterTable(cmd, table)
+      AlterTableExec(table.catalog, table.identifier, cmd.changes) :: Nil
 
     case CreateIndex(ResolvedTable(_, _, table, _),
         indexName, indexType, ifNotExists, columns, properties) =>
@@ -717,6 +713,29 @@ private[sql] object DataSourceV2Strategy extends Logging {
     } else {
       withFilter
     }
+  }
+
+  private def prepareColumns(columnDefs: Seq[ColumnDefinition],
+                             tableCatalog: TableCatalog,
+                             ident: Identifier,
+                             statementType: String): Array[Column] = {
+
+    ResolveDefaultColumns.validateCatalogForDefaultValue(columnDefs, tableCatalog, ident)
+    val prepGeneratedCol =
+      GeneratedColumnV2.prepareGeneratedColumns(columnDefs, tableCatalog, ident)
+    IdentityColumn.validateIdentityColumns(columnDefs, tableCatalog, ident)
+
+    columnDefs.map { c =>
+      ColumnImpl(
+        c.name,
+        c.dataType,
+        c.nullable,
+        c.comment.orNull,
+        c.defaultValue.map(_.toV2(statementType, c.name)).orNull,
+        prepGeneratedCol(c).orNull,
+        c.identityColumnSpec.orNull,
+        if (c.metadata == Metadata.empty) null else c.metadata.json)
+    }.toArray
   }
 }
 
