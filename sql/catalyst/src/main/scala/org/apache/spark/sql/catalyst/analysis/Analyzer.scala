@@ -3715,6 +3715,8 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
             case other => other
           }
           val newWrite = v2Write.withNewQuery(projection).withNewTable(cleanedTable)
+          // If we fired, we must resolve the output.
+          // todo: keep assertion?
           assert(newWrite.outputResolved)
           newWrite
         } else {
