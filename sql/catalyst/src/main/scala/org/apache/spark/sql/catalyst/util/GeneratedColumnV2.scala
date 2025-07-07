@@ -20,7 +20,7 @@ import scala.collection.mutable
 
 import org.apache.spark.sql.AnalysisException
 import org.apache.spark.sql.catalyst.analysis.{ResolvedTable, UnresolvedAttribute}
-import org.apache.spark.sql.catalyst.expressions.{Alias, Cast, Expression, OrderUtils, VariableReference}
+import org.apache.spark.sql.catalyst.expressions.{Alias, Cast, Expression, OrderUtils}
 import org.apache.spark.sql.catalyst.parser.{CatalystSqlParser, ParseException}
 import org.apache.spark.sql.catalyst.plans.logical.{AlterTableCommand, ColumnDefinition, LocalRelation, LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.trees.TreePattern
@@ -39,7 +39,10 @@ import org.apache.spark.sql.util.SchemaUtils
 object GeneratedColumnV2 {
 
   /**
-   * todo: ...
+   * Prepare to compile [[org.apache.spark.sql.catalyst.plans.logical.GeneratedColumnDef]]s.
+   * @return a function that compiles the optional
+   *         [[org.apache.spark.sql.catalyst.plans.logical.GeneratedColumnDef]]
+   *         of a [[ColumnDefinition]] to a validated [[GeneratedColumnSpec]].
    */
   def prepareGeneratedColumns(columns: Seq[ColumnDefinition],
                               catalog: TableCatalog,
@@ -75,17 +78,18 @@ object GeneratedColumnV2 {
     val schema = CharVarcharUtils.replaceCharVarcharWithStringInSchema(
       StructType(baseCols.map(_.toSimpleStructField)))
     val relation = LocalRelation(schema)
-//    val baseAttrs = AttributeSet {
-//      for ((attr, col) <- relation.output.zip(columns)
-//           if col.generationExpression.isEmpty && col.identityColumnSpec.isEmpty)
-//      yield attr
-//    }
 
     col => {
       col.generationExpression.map { gcDef =>
+        // Generated columns must support equality checks because the writer must be
+        // able to enforce: <column value> <=> <generated expression>.
+        val sql = gcDef.captured.sql
+        if (!OrderUtils.isOrderable(col.dataType)) {
+          throw unsupportedExpressionError(col.name, sql,
+            s"Generated columns not supported for data type ${col.dataType.simpleString}")
+        }
         val parsed = gcDef.captured.parsedExpr
-        val analyzed = validate(col.name, gcDef.captured.sql, parsed,
-          col.dataType, relation, genCols.map(_.name))
+        val analyzed = validate(col.name, sql, parsed, col.dataType, relation, genCols.map(_.name))
         // todo: do we want any rewrites on analyzed?
         val v2Expr = new V2ExpressionBuilder(analyzed).build().orNull
         val wrappedExpr = ExternalExpression.create(gcDef.captured.sql, v2Expr)
@@ -93,14 +97,6 @@ object GeneratedColumnV2 {
       }
     }
   }
-
-  // todo: test that the following are blocked:
-  //     - subqueries
-  //     - agg & window fns
-  //     - udfs (sql and non-sql, perm and temp; temp are in v1 catalog with builtins)
-  //     - variables
-  //     - non-det builtins
-  //     - non-base fields
 
   private def validate(name: String,
                        sql: String,
@@ -118,26 +114,16 @@ object GeneratedColumnV2 {
       throw unsupportedExpressionError(name, sql, "subquery expressions are not allowed")
     }
 
-    // Analyze the parsed result
+    // Analyze the parsed result.  This will raise error for:
+    //   Non-base column reference
+    //   Non-builtin function
+    //   Variable reference
     val analyzed = analyzeExpr(name, sql, parsed, input, generatedColumns)
-
-    // todo: is this possible with special analyzer?
-    //    if blocked by analyzer, should error be improved (var not found vs not allowed)?
-    if (analyzed.exists(_.isInstanceOf[VariableReference])) {
-      throw unsupportedExpressionError(name, sql, "cannot reference variables")
-    }
 
     // todo: for stored GCs, nondet could be ok
     if (!analyzed.deterministic) {
       throw unsupportedExpressionError(name, sql, "expression must be deterministic")
     }
-
-//    val nonBase = analyzed.references -- baseAttrs
-//    if (nonBase.nonEmpty) {
-//      val names = nonBase.map(_.name).toVector.sorted.mkString(", ")
-//      throw unsupportedExpressionError(name, sql,
-//        s"expression cannot refer to non-base field(s) $names")
-//    }
 
     // todo: what about context-dependent:
     //         CurrentTimestamp, CurrentUser, CurrentDatabase, CurrentSchema, ...?
@@ -145,14 +131,6 @@ object GeneratedColumnV2 {
     //   for constraints, they can be used, but only in limited way
     //   for defaults, they are ok.
     //   if (analyzed.containsPattern(CURRENT_LIKE)) {}
-
-    // Generated columns must support equality checks because the writer must be able to enforce:
-    //      <column value> <=> <generated expression>.
-    if (!OrderUtils.isOrderable(analyzed.dataType)) {
-      throw unsupportedExpressionError(name, sql,
-        s"generation expression data type ${analyzed.dataType.simpleString} " +
-            s"does not support equality comparison")
-    }
 
     if (!Cast.canUpCast(analyzed.dataType, dataType)) {
       throw unsupportedExpressionError(name, sql,
@@ -170,15 +148,6 @@ object GeneratedColumnV2 {
     analyzed
   }
 
-  def analyzeAndValidateUse(plan: LogicalPlan): LogicalPlan = {
-    // todo: do we need to do any more validation?
-    //    We could be running an expression defined by a malicious 3rd party
-    //    that may have bypassed our creation checks.
-    //    Could this expression access other sql data?
-    //    Can this expression access the network or local env?
-    analyzePlan(plan)
-  }
-
   private def analyzePlan(plan: LogicalPlan): LogicalPlan = {
     val analyzer = GeneratedColumnAnalyzer
     // todo: need to control all semantics changing confs, like ansi mode
@@ -192,11 +161,12 @@ object GeneratedColumnV2 {
   //       They could be captured at the table level or be set globally.
   //       We also need a story for how more settings roll out.
   //       This conf management should be common with mat views.
-  private def analyzeExpr(name: String,
-                          sql: String,
-                          parsed: Expression,
-                          relation: LogicalPlan,
-                          generatedColumns: Seq[String]): Expression = {
+  def analyzeExpr(
+      name: String,
+      sql: String,
+      parsed: Expression,
+      relation: LogicalPlan,
+      generatedColumns: Seq[String]): Expression = {
     val plan = try {
       analyzePlan(Project(Seq(Alias(parsed, name)()), relation))
     } catch {
@@ -262,50 +232,26 @@ object GeneratedColumnV2 {
 
   /**
    * Simply parse the expression.
-   * @param category
-   * @param name
-   * @param sql
+   * @param category The object type that stores the expression, either "Field" or "Constraint".
+   * @param name The name of the object that stores the expression.
+   * @param sql The spark sql text.
    * @return
    */
-  private[catalyst] def parseExpression(category: String,
-                                        name: String,
-                                        sql: String): Expression = {
-      try {
-        // todo: any problem with constructing parsers?
-        //       afaik, they are not thread safe, even though I see parsers shared between threads
-        //       eg GeneratedColumns.parser
-        new CatalystSqlParser().parseExpression(sql)
-      } catch {
-        case e: ParseException =>
-          // This is possible, eg when defined in a different spark version.
-          // todo: add category to error
-          throw unsupportedExpressionError(name, sql, e.getLocalizedMessage)
-      }
+  def parseExpression(category: String,
+                      name: String,
+                      sql: String): Expression = {
+    try {
+      // todo: any problem with constructing parsers?
+      //       afaik, they are not thread safe, even though I see parsers shared between threads
+      //       eg GeneratedColumns.parser
+      new CatalystSqlParser().parseExpression(sql)
+    } catch {
+      case e: ParseException =>
+        // This is possible, eg when defined in a different spark version.
+        // todo: add category to error
+        throw unsupportedExpressionError(name, sql, e.getLocalizedMessage)
+    }
   }
-
-
-//  private[catalyst] def parseAndValidateExpression(objectType: String,
-//                                                   name: String,
-//                                                   sql: String,
-//                                                   dataType: DataType,
-//                                                   input: LogicalPlan): Expression = {
-//    require(input.resolved)
-//    val parsed =
-//      try {
-//        // todo: any problem with constructing parsers?
-//        //       afaik, they are not thread safe, even though I see parsers shared between threads
-//        //       eg GeneratedColumns.parser
-//        new CatalystSqlParser().parseExpression(sql)
-//      } catch {
-//        case _: ParseException =>
-//          // This is possible, eg when defined in a different spark version.
-//          // todo: better error
-//          throw new Exception(s"Unable to parse expression in $objectType $name: $sql")
-//      }
-//
-//    validate(name, sql, parsed, dataType, input, input.outputSet)
-//  }
-
 
   /**
    * Verify column changes do not affect undropped generated columns and check constraints.

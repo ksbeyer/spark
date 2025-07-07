@@ -3714,7 +3714,9 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
               r.copy(output = r.output.map(CharVarcharUtils.cleanAttrMetadata))
             case other => other
           }
-          v2Write.withNewQuery(projection).withNewTable(cleanedTable)
+          val newWrite = v2Write.withNewQuery(projection).withNewTable(cleanedTable)
+          assert(newWrite.outputResolved)
+          newWrite
         } else {
           v2Write
         }

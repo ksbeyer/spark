@@ -935,7 +935,7 @@ class GeneratedColumnsSuite extends DatasourceV2SQLBase {
     sql(s"USE $cat")
     val query =
       """create table t (x int not null,
-        |                 y int not null generated always as (-x))
+        |                y int not null generated always as (-x))
         | using csv
         | as select id as x from range(3)""".stripMargin
     checkError(
@@ -945,13 +945,113 @@ class GeneratedColumnsSuite extends DatasourceV2SQLBase {
       condition = "_LEGACY_ERROR_TEMP_0035",
       parameters = Map(
         "message" -> "Schema may not be specified in a Create Table As Select (CTAS) statement"),
-      context = ExpectedContext(fragment = query, start = 0, stop = 132)
+      context = ExpectedContext(fragment = query, start = 0, stop = 131)
     )
   }
 
+  test("no generated columns on unorderable types") {
+    // generated column isn't actually relevant to the test today - any schema is blocked,
+    // but if ctas supports schemas someday, we want generated columns to be considered.
+    sql(s"USE $cat")
+    checkError(
+      intercept[AnalysisException] {
+        sql(
+          """create table t (x string not null,
+            |                y string not null,
+            |                z map<string,string> not null generated always as (map(x,y)))
+            | using csv""".stripMargin)
+      },
+      condition = "UNSUPPORTED_EXPRESSION_GENERATED_COLUMN",
+      parameters = Map(
+        "fieldName" -> "z",
+        "expressionStr" -> "map(x,y)",
+        "reason" -> "Generated columns not supported for data type map<string,string>"))
 
-  // blocked on v1 also in DDLSuite.scala
-  // blocked on v2 catalog without GC feature in DataSourceV2SQLSuite.scala
+    checkError(
+      intercept[AnalysisException] {
+        sql(
+          """create table t (x string not null,
+            |                y variant not null generated always as (parse_json(x)))
+            | using csv""".stripMargin)
+      },
+      condition = "UNSUPPORTED_EXPRESSION_GENERATED_COLUMN",
+      parameters = Map(
+        "fieldName" -> "y",
+        "expressionStr" -> "parse_json(x)",
+        "reason" -> "Generated columns not supported for data type variant"))
+  }
+
+
+  test("generated columns support upcast") {
+    // generated column isn't actually relevant to the test today - any schema is blocked,
+    // but if ctas supports schemas someday, we want generated columns to be considered.
+    sql(s"USE $cat")
+    withTable("t") {
+      sql(
+        """create table t (a int not null,
+          |                x string generated always as (a),
+          |                y long not null generated always as (a + 1),
+          |                z decimal(12,2) not null generated always as (a + 2))
+          | using csv
+          | """.stripMargin)
+
+      sql("insert into t values (3), (5), (7)")
+      checkAnswer(spark.table("t"),
+        sql(
+          """select cast(id as int) as a,
+            |       cast(a as string) as x,
+            |       cast(a + 1 as long) as y,
+            |       cast(a + 2 as decimal(12,2)) as z
+            | from range(3,8,2)
+            | """.stripMargin))
+    }
+  }
+
+  test("generated columns require upcast") {
+    checkError(
+      intercept[AnalysisException] {
+        sql(
+          s"""create table $cat.t (x int not null,
+             |                     y decimal(8,2) not null generated always as (x/100))
+             | using csv
+             | """.stripMargin)
+      },
+      condition = "UNSUPPORTED_EXPRESSION_GENERATED_COLUMN",
+      parameters = Map(
+        "fieldName" -> "y",
+        "expressionStr" -> "x/100",
+        "reason" -> ("generation expression data type double is incompatible " +
+            "with column data type decimal(8,2)")))
+  }
+
+  test("generated columns error blocks insert") {
+    // generated column isn't actually relevant to the test today - any schema is blocked,
+    // but if ctas supports schemas someday, we want generated columns to be considered.
+    sql(s"USE $cat")
+    withTable("t") {
+      sql(
+        """create table t (a int not null,
+          |                x string generated always as (a),
+          |                y double not null generated always as (a / 10),
+          |                z decimal(12,2) not null generated always as (a + 2))
+          | using csv
+          | """.stripMargin)
+
+      sql("insert into t values (3), (5), (7)")
+      checkAnswer(spark.table("t"),
+        sql(
+          """select cast(id as int) as a,
+            |       cast(a as string) as x,
+            |       a / 10 as y,
+            |       cast(a + 2 as decimal(12,2)) as z
+            | from range(3,8,2)
+            | """.stripMargin))
+    }
+  }
+
+  // blocked on v1 also in DDLSuite
+  // blocked on v2 catalog without GC feature in DataSourceV2SQLSuite
+  // blocked use of collations tested by CollationSuite
 
   // todo: test ExternalExpression
   //   sql + expr
@@ -978,10 +1078,6 @@ class GeneratedColumnsSuite extends DatasourceV2SQLBase {
   // todo: if we replace the path, can driver use of v2 expressions be opaque to this layer?
   // todo: related, can we store validated catalyst in ExternalExpression?
 
-  // todo: incomparable types are not supported: eg, variant.
-  // todo: can upcast
-  // todo: must upcast
-
   // todo: bug on master
   //   create table t(
   //      a struct<b: struct<c: int, d: int>, e: int> not null
@@ -999,4 +1095,5 @@ class GeneratedColumnsSuite extends DatasourceV2SQLBase {
   //       in org.apache.spark.sql.catalyst.analysis.TableOutputResolver.reorderColumnsByName
   //       where does UpCast go on defaults?
 
+  // todo: any issue with CREATE TABLE LIKE
 }

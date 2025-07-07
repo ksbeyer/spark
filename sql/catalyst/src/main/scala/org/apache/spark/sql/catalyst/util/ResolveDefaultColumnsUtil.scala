@@ -273,10 +273,17 @@ object ResolveDefaultColumns extends QueryErrorsBase
     }
   }
 
-  def getGeneratedOrIdentityOrThrow(field: StructField): Expression =
-    getGeneratedExpr(field).
-        orElse(getIdentityExpr(field)).
-        getOrElse(failNoDefault(field.name))
+  def getGeneratedOrIdentityOrThrow(field: StructField, input: LogicalPlan): Expression = {
+    val parsed =
+      getGeneratedExpr(field).
+          orElse(getIdentityExpr(field)).
+          getOrElse(failNoDefault(field.name))
+    val sql = "???" // todo: need to rework above to get sql
+    // We don't need the other generated column names here;
+    // a bad column will be reported as unresolved instead of can't refer to other gen cols.
+    // todo: pass gen col names here?
+    GeneratedColumnV2.analyzeExpr(field.name, sql, parsed, input, Seq.empty)
+  }
 
   private def getGeneratedExpr(field: StructField): Option[Expression] =
     GeneratedColumn.getGenerationExpression(field).map { sql =>
