@@ -343,8 +343,6 @@ object TableOutputResolver extends SQLConfHelper with Logging {
                            conf: SQLConf,
                            newColPath: Seq[String]): NamedExpression = {
     (inputCol.dataType, expectedCol.dataType) match {
-      // todo: The first case was applied to resolveUpdate but not
-      //       resolveColumnsByPosition, reorderColumnsByName
       // no need to reorder inner fields or cast if types are already compatible
       case (inputType: StructType, expectedType: StructType) =>
         resolveStructType(
