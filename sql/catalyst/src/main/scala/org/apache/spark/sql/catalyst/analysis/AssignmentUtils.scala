@@ -121,7 +121,7 @@ object AssignmentUtils extends SQLConfHelper with CastSupport {
         val actualAttr = restoreActualType(attr)
         val value = matchingAssignments.head.value
         TableOutputResolver.resolveUpdate(
-          "", value, actualAttr, conf, err => errors += err, colPath)
+          "", value, actualAttr, conf, colPath)
       }
       Assignment(attr, resolvedValue)
     }
@@ -165,7 +165,7 @@ object AssignmentUtils extends SQLConfHelper with CastSupport {
       TableOutputResolver.checkNullability(colExpr, col, conf, colPath)
     } else if (exactAssignments.nonEmpty) {
       val value = exactAssignments.head.value
-      TableOutputResolver.resolveUpdate("", value, col, conf, addError, colPath)
+      TableOutputResolver.resolveUpdate("", value, col, conf, colPath)
     } else {
       applyFieldAssignments(col, colExpr, fieldAssignments, addError, colPath)
     }
