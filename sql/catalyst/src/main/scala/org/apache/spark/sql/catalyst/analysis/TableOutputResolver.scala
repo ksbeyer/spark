@@ -332,6 +332,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     }
   }
 
+
   private[sql] def checkNullability(
       input: Expression,
       expected: Attribute,
