@@ -3698,8 +3698,38 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
               r.copy(output = r.output.map(CharVarcharUtils.cleanAttrMetadata))
             case other => other
           }
-          v2Write.withNewQuery(projection).withNewTable(cleanedTable)
+          val newWrite = v2Write.withNewQuery(projection).withNewTable(cleanedTable)
+          if (newWrite.resolved) {
+            // Success! The write is now fully resolved.
+            newWrite
+          } else {
+            // We resolved the output, but either the query went from resolved to not resolved
+            // or the output is not fully resolved.
+            // Column resolution must be all or nothing, or else generated-always fields
+            // will error thinking the user specified the values.
+            // todo: raise exception if partially resolved?
+            // todo: remove debugging
+            projection.output.zip(cleanedTable.output).foreach {
+              case (inAttr, outAttr) =>
+                val inType = CharVarcharUtils.getRawType(inAttr.metadata).getOrElse(inAttr.dataType)
+                val outType = CharVarcharUtils.getRawType(outAttr.metadata).getOrElse(outAttr.dataType)
+                // names and types must match, nullability must be compatible
+                if (inAttr.name != outAttr.name) {
+                  println("name")
+                }
+                if (!DataType.equalsIgnoreCompatibleNullability(inType, outType)) {
+                  println("type")
+                }
+                if (!(outAttr.nullable || !inAttr.nullable)) {
+                  println("nulls")
+                }
+            }
+            v2Write
+          }
         } else {
+          // We didn't make any progress resolving the target columns.
+          // We cannot clean the target table metadata until we complete resolution.
+          // Return the original write without change.
           v2Write
         }
     }

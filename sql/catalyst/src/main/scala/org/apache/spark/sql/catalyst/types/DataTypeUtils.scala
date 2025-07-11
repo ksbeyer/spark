@@ -126,8 +126,8 @@ object DataTypeUtils {
         // read. map keys can be missing fields as long as they are nullable in the read schema.
 
         // run compatibility check first to produce all error messages
-        verifyCanWrite(tableName, wMap.keyType, rMap.keyType, byName, resolver, context + ".key",
-          storeAssignmentPolicy)
+        verifyCanWrite(tableName, wMap.keyType, rMap.keyType, byName, resolver,
+          context + ".key", storeAssignmentPolicy)
         verifyCanWrite(tableName, wMap.valueType, rMap.valueType, byName, resolver,
           context + ".value", storeAssignmentPolicy)
 
@@ -156,12 +156,9 @@ object DataTypeUtils {
 
         if (readFields.length > writeFields.length) {
           val missingFieldsStr = readFields.takeRight(readFields.length - writeFields.length)
-            .map(f => s"${toSQLId(f.name)}").mkString(", ")
-          if (missingFieldsStr.nonEmpty) {
-            throw QueryCompilationErrors.incompatibleDataToTableStructMissingFieldsError(
-              tableName, context, missingFieldsStr)
-          }
-
+              .map(f => s"${toSQLId(f.name)}").mkString(", ")
+          throw QueryCompilationErrors.incompatibleDataToTableStructMissingFieldsError(
+            tableName, context, missingFieldsStr)
         } else if (writeFields.length > readFields.length) {
           val extraFieldsStr = writeFields.takeRight(writeFields.length - readFields.length)
             .map(f => s"${toSQLId(f.name)}").mkString(", ")
