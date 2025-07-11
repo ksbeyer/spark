@@ -1992,6 +1992,14 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         checkAnswer(spark.table("t"), Row(null))
       }
     }
+    withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "true",
+      SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
+      withTable("t") {
+        sql("create table t (a struct<x: long> default struct(42)) using json")
+        sql("insert into t values (cast(null as struct<x: int>))")
+        checkAnswer(spark.table("t"), Row(null))
+      }
+    }
     withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "false",
       SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
       withTable("t") {
