@@ -172,7 +172,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
 //            if attr.name == expr.name && attr.metadata == expr.metadata => expr
 //          // Save an Alias if we can change the name directly.
 //          case a: Attribute => a.withName(attr.name).withMetadata(attr.metadata)
-//          case a: Alias => Alias(a.child, attr.name)(explicitMetadata = Some(attr.metadata))
+//          case a: Alias => Alias(a.child, attr.name)()
 //          case _ => Alias(expr, attr.name)(explicitMetadata = Some(attr.metadata))
 //        }
   }
@@ -371,9 +371,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
       conf, byName, fillDefaultValue = false, colPath)
     if (res.head == param) {
       // If the element type is the same, we can reuse the input array directly.
-      Alias(nullCheckedInput, expected.name)(
-        nonInheritableMetadataKeys =
-          Seq(CharVarcharUtils.CHAR_VARCHAR_TYPE_STRING_METADATA_KEY))
+      Alias(nullCheckedInput, expected.name)()
     } else {
       val func = LambdaFunction(res.head, Seq(param))
       Alias(ArrayTransform(nullCheckedInput, func), expected.name)()
@@ -406,9 +404,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
     // If the key and value expressions have not changed, we just check original map field.
     // Otherwise, we construct a new map by adding transformations to the keys and values.
     if (resKey.head == keyParam && resValue.head == valueParam) {
-      Alias(nullCheckedInput, expected.name)(
-        nonInheritableMetadataKeys =
-          Seq(CharVarcharUtils.CHAR_VARCHAR_TYPE_STRING_METADATA_KEY))
+      Alias(nullCheckedInput, expected.name)()
     } else {
       val newKeys = if (resKey.head != keyParam) {
         val keyFunc = LambdaFunction(resKey.head, Seq(keyParam))
