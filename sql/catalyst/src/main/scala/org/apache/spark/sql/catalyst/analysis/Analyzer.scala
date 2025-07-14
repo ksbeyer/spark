@@ -3711,8 +3711,10 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
             // todo: remove debugging
             projection.output.zip(cleanedTable.output).foreach {
               case (inAttr, outAttr) =>
-                val inType = CharVarcharUtils.getRawType(inAttr.metadata).getOrElse(inAttr.dataType)
-                val outType = CharVarcharUtils.getRawType(outAttr.metadata).getOrElse(outAttr.dataType)
+                val inType = CharVarcharUtils.getRawType(inAttr.metadata).
+                    getOrElse(inAttr.dataType)
+                val outType = CharVarcharUtils.getRawType(outAttr.metadata).
+                    getOrElse(outAttr.dataType)
                 // names and types must match, nullability must be compatible
                 if (inAttr.name != outAttr.name) {
                   println("name")
