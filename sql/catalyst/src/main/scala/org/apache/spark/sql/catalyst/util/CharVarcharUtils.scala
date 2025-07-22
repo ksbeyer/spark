@@ -245,10 +245,14 @@ object CharVarcharUtils extends Logging with SparkCharVarcharUtils {
     }
   }
 
-  def addPaddingForScan(attr: Attribute): Expression = {
+  def addPaddingForScan(attr: Attribute): NamedExpression = {
     getRawType(attr.metadata).map { rawType =>
-      processStringForCharVarchar(
+      val e = processStringForCharVarchar(
         attr, rawType, charFuncName = Some("readSidePadding"), varcharFuncName = None)
+      // todo: should this clear the metadata key?
+      // Alias(e, attr.name)(nonInheritableMetadataKeys =
+      //  Seq(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY))
+      e
     }.getOrElse(attr)
   }
 

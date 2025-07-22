@@ -18,13 +18,11 @@
 package org.apache.spark.sql.catalyst.analysis
 
 import org.apache.spark.sql.catalyst.expressions.{
-  Alias,
   Attribute,
   BinaryComparison,
   Expression,
   In,
   Literal,
-  NamedExpression,
   OuterReference,
   StringRPad
 }
@@ -51,12 +49,7 @@ object ApplyCharTypePaddingHelper {
   private[sql] def readSidePadding(
       relation: LogicalPlan,
       cleanedRelation: () => LogicalPlan): (LogicalPlan, Seq[(Attribute, Attribute)]) = {
-    val projectList = relation.output.map { attr =>
-      CharVarcharUtils.addPaddingForScan(attr) match {
-        case ne: NamedExpression => ne
-        case other => Alias(other, attr.name)(explicitMetadata = Some(attr.metadata))
-      }
-    }
+    val projectList = relation.output.map(CharVarcharUtils.addPaddingForScan)
     if (projectList == relation.output) {
       relation -> Nil
     } else {

@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, Project}
 import org.apache.spark.sql.catalyst.types.DataTypeUtils
 import org.apache.spark.sql.catalyst.types.DataTypeUtils.toAttributes
 import org.apache.spark.sql.catalyst.util.CharVarcharUtils
+import org.apache.spark.sql.catalyst.util.CharVarcharUtils.CHAR_VARCHAR_TYPE_STRING_METADATA_KEY
 import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns.getDefaultValueExprOrNullLit
 import org.apache.spark.sql.catalyst.util.TypeUtils.toSQLId
 import org.apache.spark.sql.connector.catalog.CatalogV2Implicits._
@@ -227,16 +228,38 @@ object TableOutputResolver extends SQLConfHelper with Logging {
                              byName: Boolean,
                              fillDefaultValue: Boolean,
                              colPath: Seq[String] = Nil): Seq[NamedExpression] = {
+    val actualExpectedCols = expectedCols.map { c =>
+      CharVarcharUtils.getRawType(c.metadata).map(c.withDataType).getOrElse(c)
+    }
+
     val resolved = if (byName) {
-      reorderColumnsByName(tableName, inputCols, expectedCols, conf,
+      reorderColumnsByName(tableName, inputCols, actualExpectedCols, conf,
         colPath, fillDefaultValue)
     } else {
-      resolveColumnsByPosition(tableName, inputCols, expectedCols, conf, colPath)
+      resolveColumnsByPosition(tableName, inputCols, actualExpectedCols, conf, colPath)
     }
     assert(resolved.length == expectedCols.length,
       s"expected number of resolved byName=$byName columns" +
           s"${expectedCols.length} != ${resolved.length}")
-    resolved
+
+    // todo: where should the char/varchar be dealt with?
+    //     Feels like it should be before this point...
+    //   But if we don't do this,
+    //    DeltaBasedMergeIntoTableUpdateAsDeleteAndInsertSuite.
+    //       test("SPARK-51513: Fix RewriteMergeIntoTable rule produces unresolved plan")
+    //   fails because the _value_ has varchar anno and gets false from:
+    //     org.apache.spark.sql.catalyst.plans.logical.V2WriteCommand.areCompatible
+
+    val withoutCharVarchar = resolved.map { attr =>
+      if (CharVarcharUtils.getRawType(attr.metadata).isDefined) {
+        Alias(attr, attr.name)(
+          nonInheritableMetadataKeys = Seq(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY))
+      } else {
+        attr
+      }
+    }
+
+    withoutCharVarchar
   }
 
   private def reorderColumnsByName(
@@ -269,10 +292,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
       } else {
         matchedCols += matched.head.name
         val matchedCol = matched.head
-        val actualExpectedCol = expectedCol.withDataType {
-          CharVarcharUtils.getRawType(expectedCol.metadata).getOrElse(expectedCol.dataType)
-        }
-        resolveField(tableName, matchedCol, actualExpectedCol, byName = true, conf, newColPath)
+        resolveField(tableName, matchedCol, expectedCol, byName = true, conf, newColPath)
       }
     }
 
@@ -297,28 +317,25 @@ object TableOutputResolver extends SQLConfHelper with Logging {
       expectedCols: Seq[Attribute],
       conf: SQLConf,
       colPath: Seq[String] = Nil): Seq[NamedExpression] = {
-    val actualExpectedCols = expectedCols.map { attr =>
-      attr.withDataType { CharVarcharUtils.getRawType(attr.metadata).getOrElse(attr.dataType) }
-    }
-    if (inputCols.size > actualExpectedCols.size) {
-      val extraColsStr = inputCols.takeRight(inputCols.size - actualExpectedCols.size)
+    if (inputCols.size > expectedCols.size) {
+      val extraColsStr = inputCols.takeRight(inputCols.size - expectedCols.size)
           .map(col => toSQLId(col.name))
           .mkString(", ")
       if (colPath.isEmpty) {
         throw QueryCompilationErrors.cannotWriteTooManyColumnsToTableError(tableName,
-          actualExpectedCols.map(_.name), inputCols.map(_.toAttribute))
+          expectedCols.map(_.name), inputCols.map(_.toAttribute))
       } else {
         throw QueryCompilationErrors.incompatibleDataToTableExtraStructFieldsError(
           tableName, colPath.quoted, extraColsStr
         )
       }
-    } else if (inputCols.size < actualExpectedCols.size) {
-      val missingColsStr = actualExpectedCols.takeRight(actualExpectedCols.size - inputCols.size)
+    } else if (inputCols.size < expectedCols.size) {
+      val missingColsStr = expectedCols.takeRight(expectedCols.size - inputCols.size)
           .map(col => toSQLId(col.name))
           .mkString(", ")
       if (colPath.isEmpty) {
         throw QueryCompilationErrors.cannotWriteNotEnoughColumnsToTableError(tableName,
-          actualExpectedCols.map(_.name), inputCols.map(_.toAttribute))
+          expectedCols.map(_.name), inputCols.map(_.toAttribute))
       } else {
         throw QueryCompilationErrors.incompatibleDataToTableStructMissingFieldsError(
           tableName, colPath.quoted, missingColsStr
@@ -326,7 +343,7 @@ object TableOutputResolver extends SQLConfHelper with Logging {
       }
     }
 
-    inputCols.zip(actualExpectedCols).map { case (inputCol, expectedCol) =>
+    inputCols.zip(expectedCols).map { case (inputCol, expectedCol) =>
       val newColPath = colPath :+ expectedCol.name
       resolveField(tableName, inputCol, expectedCol, byName = false, conf, newColPath)
     }
