@@ -2005,8 +2005,7 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         checkAnswer(spark.table("t"), Row(42, null))
       }
     }
-    // SPARK-52772 complex types get same null handling.
-    withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "true",
+    withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "false",
       SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
       withTable("t") {
         sql("create table t (a struct<x: long> default struct(42), b int) using json")
@@ -2018,12 +2017,17 @@ class InsertSuite extends DataSourceTest with SharedSparkSession {
         checkAnswer(spark.table("t"), Row(null, null))
       }
     }
+    // SPARK-52772 complex types get same null handling.
     withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "true",
       SQLConf.JSON_GENERATOR_IGNORE_NULL_FIELDS.key -> "true") {
       withTable("t") {
-        sql("create table t (a struct<x: long> default struct(42)) using json")
-        sql("insert into t values (cast(null as struct<x: int>))")
-        checkAnswer(spark.table("t"), Row(null))
+        sql("create table t (a struct<x: long> default struct(42), b int) using json")
+        // The cast gets the TableOutputResolver to enter the Struct,Struct case.
+        sql("insert into t values (cast(null as struct<x: int>), null)")
+        // nulls should be written for fields with defaults, but not for fields without defaults.
+        checkAnswer(readTableAsText("t"), Row("{\"a\":null}"))
+        // default value is not filled in for existing fields.
+        checkAnswer(spark.table("t"), Row(null, null))
       }
     }
     withSQLConf(SQLConf.JSON_GENERATOR_WRITE_NULL_IF_WITH_DEFAULT_VALUE.key -> "false",
