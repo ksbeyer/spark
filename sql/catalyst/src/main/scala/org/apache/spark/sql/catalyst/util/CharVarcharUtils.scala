@@ -98,10 +98,14 @@ object CharVarcharUtils extends Logging with SparkCharVarcharUtils {
    * the given metadata.
    */
   def cleanMetadata(metadata: Metadata): Metadata = {
-    new MetadataBuilder()
-      .withMetadata(metadata)
-      .remove(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY)
-      .build()
+    if (metadata.contains(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY)) {
+      new MetadataBuilder()
+        .withMetadata(metadata)
+        .remove(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY)
+        .build()
+    } else {
+      metadata
+    }
   }
 
   def getRawTypeString(metadata: Metadata): Option[String] = {
@@ -245,14 +249,10 @@ object CharVarcharUtils extends Logging with SparkCharVarcharUtils {
     }
   }
 
-  def addPaddingForScan(attr: Attribute): NamedExpression = {
+  def addPaddingForScan(attr: Attribute): Expression = {
     getRawType(attr.metadata).map { rawType =>
-      val e = processStringForCharVarchar(
+      processStringForCharVarchar(
         attr, rawType, charFuncName = Some("readSidePadding"), varcharFuncName = None)
-      // todo: should this clear the metadata key?
-      // Alias(e, attr.name)(nonInheritableMetadataKeys =
-      //  Seq(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY))
-      e
     }.getOrElse(attr)
   }
 
