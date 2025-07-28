@@ -99,8 +99,8 @@ object CharVarcharUtils extends Logging with SparkCharVarcharUtils {
    */
   def cleanMetadata(metadata: Metadata): Metadata = {
     new MetadataBuilder()
-      .withMetadata(metadata).
-        remove(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY)
+      .withMetadata(metadata)
+      .remove(CHAR_VARCHAR_TYPE_STRING_METADATA_KEY)
       .build()
   }
 
