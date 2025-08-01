@@ -3707,7 +3707,7 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
           // Column resolution must be all or nothing, or else generated-always fields
           // will error thinking the user specified the values.
           // todo: raise exception if partially resolved?
-          // todo: remove debugging
+          // todo: remove debugging and/or fix errors
           projection.output.zip(cleanedTable.output).foreach {
             case (inAttr, outAttr) =>
               val inType = CharVarcharUtils.getRawType(inAttr.metadata).
@@ -3716,13 +3716,14 @@ class Analyzer(override val catalogManager: CatalogManager) extends RuleExecutor
                   getOrElse(outAttr.dataType)
               // names and types must match, nullability must be compatible
               if (inAttr.name != outAttr.name) {
-                println("name")
+                // println("name")
+                throw new Exception("table output resolver failed: name mismatch")
               }
               if (!DataType.equalsIgnoreCompatibleNullability(inType, outType)) {
-                println("type")
+                throw new Exception("table output resolver failed: data type mismatch")
               }
-              if (!(outAttr.nullable || !inAttr.nullable)) {
-                println("nulls")
+              if (!outAttr.nullable && inAttr.nullable) {
+                throw new Exception("table output resolver failed: null mismatch")
               }
           }
           v2Write
